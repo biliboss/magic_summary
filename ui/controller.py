@@ -7,9 +7,10 @@ from typing import Optional, TYPE_CHECKING
 
 from PySide6.QtCore import QObject, QThread, Signal, Slot
 
-from core.models import ProcessingStatus, VideoSummary
+from core.models import ProcessingStatus, VideoSummary, TranscriptSegment
 from core.summarization import SummarizationService
 from core.transcription import TranscriptionService
+from core.storage import load_transcript, save_transcript, transcript_to_text
 
 if TYPE_CHECKING:  # pragma: no cover
     from .main_window import MainWindow
@@ -22,6 +23,9 @@ class ProcessingWorker(QObject):
 
     status = Signal(object)
     summary_ready = Signal(object)
+    segments_ready = Signal(object)
+    transcript_text_ready = Signal(str)
+    backend_info_ready = Signal(dict)
     error = Signal(str)
     finished = Signal()
 
@@ -30,11 +34,13 @@ class ProcessingWorker(QObject):
         video_path: Path,
         transcription_service: TranscriptionService,
         summarization_service: SummarizationService,
+        cached_segments: list[TranscriptSegment] | None = None,
     ) -> None:
         super().__init__()
         self._video_path = Path(video_path)
         self._transcription_service = transcription_service
         self._summarization_service = summarization_service
+        self._cached_segments = cached_segments
 
     def _on_status(self, status: ProcessingStatus) -> None:
         self.status.emit(status)
@@ -42,10 +48,30 @@ class ProcessingWorker(QObject):
     @Slot()
     def run(self) -> None:
         try:
-            segments = self._transcription_service.transcribe(
-                self._video_path,
-                status_cb=self._on_status,
-            )
+            if self._cached_segments is not None:
+                segments = self._cached_segments
+                self._on_status(
+                    ProcessingStatus(
+                        status="transcribing",
+                        progress=0.4,
+                        message="Transcrição carregada do cache",
+                    )
+                )
+            else:
+                segments = self._transcription_service.transcribe(
+                    self._video_path,
+                    status_cb=self._on_status,
+                )
+                try:
+                    save_transcript(self._video_path, segments)
+                except Exception as exc:  # pragma: no cover - best effort cache write
+                    logger.warning("Não foi possível salvar cache da transcrição: %s", exc)
+
+            self.segments_ready.emit(segments)
+            self.transcript_text_ready.emit(transcript_to_text(segments))
+            backend_info = self._transcription_service.get_backend_metadata()
+            self.backend_info_ready.emit(backend_info)
+
             self._on_status(
                 ProcessingStatus(
                     status="summarizing",
@@ -98,24 +124,47 @@ class ProcessingController(QObject):
             self._window.show_error(f"Arquivo não encontrado: {video_path}")
             return
 
+        cached_segments = load_transcript(video_path)
+        cached_text = transcript_to_text(cached_segments) if cached_segments else None
+
         self._window.reset_results()
         self._window.set_busy(True)
         self._window.set_file_info(video_path)
-        self._window.set_processing(
-            ProcessingStatus(
-                status="preparing",
-                progress=0.05,
-                message=f"Preparando {video_path.name}",
-            )
-        )
 
-        worker = ProcessingWorker(video_path, self._transcription, self._summarizer)
+        if cached_segments:
+            self._window.set_processing(
+                ProcessingStatus(
+                    status="transcribing",
+                    progress=0.3,
+                    message="Transcrição carregada do cache",
+                )
+            )
+            if cached_text:
+                self._window.set_raw_transcript(cached_text)
+        else:
+            self._window.set_processing(
+                ProcessingStatus(
+                    status="preparing",
+                    progress=0.05,
+                    message=f"Preparando {video_path.name}",
+                )
+            )
+
+        worker = ProcessingWorker(
+            video_path,
+            self._transcription,
+            self._summarizer,
+            cached_segments=cached_segments,
+        )
         thread = QThread(parent=self)
         worker.moveToThread(thread)
 
         thread.started.connect(worker.run)
         worker.status.connect(self._window.set_processing)
         worker.summary_ready.connect(self._on_summary_ready)
+        worker.segments_ready.connect(self._on_segments_ready)
+        worker.transcript_text_ready.connect(self._window.set_raw_transcript)
+        worker.backend_info_ready.connect(self._window.set_backend_info)
         worker.error.connect(self._handle_error)
         worker.finished.connect(self._on_finished)
         worker.finished.connect(thread.quit)
@@ -142,3 +191,6 @@ class ProcessingController(QObject):
         logger.info("Processamento finalizado")
         self._thread = None
         self._worker = None
+
+    def _on_segments_ready(self, segments: list[TranscriptSegment]) -> None:
+        self._window.cache_segments(segments)

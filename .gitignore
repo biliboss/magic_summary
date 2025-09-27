@@ -11,6 +11,7 @@ __pycache__/
 # Tooling
 .python-version
 uv.lock
+data/
 
 # Media artifacts
 *.mkv

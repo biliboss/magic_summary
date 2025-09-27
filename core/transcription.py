@@ -3,14 +3,11 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import BinaryIO, Callable, Tuple, TYPE_CHECKING
+from typing import BinaryIO, Callable, Tuple
 
 import subprocess
 
 from openai import OpenAI
-
-if TYPE_CHECKING:
-    from faster_whisper import WhisperModel  # type: ignore import
 
 from .config import get_openai_settings, get_ffmpeg_path
 from .models import TranscriptSegment, ProcessingStatus
@@ -27,6 +24,8 @@ class TranscriptionService:
         self._openai_client: OpenAI | None = None
         self._openai_model: str | None = None
         self._local_model = None
+        self._active_local_device: str | None = None
+        self._active_local_compute: str | None = None
 
         if self._backend == "openai":
             self._openai_client = client or OpenAI(api_key=settings.api_key)
@@ -44,11 +43,17 @@ class TranscriptionService:
                 download_kwargs["download_root"] = settings.local_download_root
 
             # Inicialização com fallback robusto para CPU
-            self._local_model = self._load_local_model(settings.local_model_name, download_kwargs)
+            model, device_used, compute_used = self._load_local_model(
+                settings.local_model_name,
+                download_kwargs,
+            )
+            self._local_model = model
+            self._active_local_device = device_used
+            self._active_local_compute = compute_used
         else:
             raise ValueError(f"Transcription backend '{self._backend}' não é suportado")
 
-    def _load_local_model(self, model_name: str, download_kwargs: dict) -> WhisperModel:
+    def _load_local_model(self, model_name: str, download_kwargs: dict) -> tuple[object, str, str]:
         """Carrega o modelo Whisper com fallback para CPU em caso de erro de GPU."""
         from faster_whisper import WhisperModel  # type: ignore import
 
@@ -56,22 +61,26 @@ class TranscriptionService:
         compute_type = self._settings.local_compute_type
 
         try:
-            return WhisperModel(
+            model = WhisperModel(
                 model_name,
                 device=device,
                 compute_type=compute_type,
                 **download_kwargs,
             )
+            return model, device, compute_type
         except Exception as exc:
             error_str = str(exc).lower()
             if any(keyword in error_str for keyword in ["cudnn", "cuda", "invalid handle", "locate"]):
                 print("Aviso: Erro de GPU (cuDNN/CUDA) detectado durante carregamento. Fazendo fallback para CPU.")
-                return WhisperModel(
+                fallback_device = "cpu"
+                fallback_compute = "float32"
+                model = WhisperModel(
                     model_name,
-                    device="cpu",
-                    compute_type="float32",
+                    device=fallback_device,
+                    compute_type=fallback_compute,
                     **download_kwargs,
                 )
+                return model, fallback_device, fallback_compute
             else:
                 raise RuntimeError(f"Erro ao carregar modelo local: {exc}") from exc
 
@@ -210,7 +219,13 @@ class TranscriptionService:
                     status_cb(ProcessingStatus(status="warning", progress=0.3, message=error_msg))
                 # Re-inicializa o modelo em CPU e tenta novamente
                 download_kwargs = {"download_root": self._settings.local_download_root} if self._settings.local_download_root else {}
-                self._local_model = self._load_local_model(self._settings.local_model_name, download_kwargs)
+                model, device_used, compute_used = self._load_local_model(
+                    self._settings.local_model_name,
+                    download_kwargs,
+                )
+                self._local_model = model
+                self._active_local_device = device_used
+                self._active_local_compute = compute_used
                 # Chama recursivamente com o novo modelo
                 return self._transcribe_local(audio_path, status_cb)
             else:
@@ -218,3 +233,18 @@ class TranscriptionService:
                 if status_cb:
                     status_cb(ProcessingStatus(status="error", progress=0.0, message=error_msg))
                 raise RuntimeError(error_msg) from exc
+
+    def get_backend_metadata(self) -> dict[str, str | None]:
+        if self._backend == "openai":
+            return {
+                "backend": "openai",
+                "model": self._openai_model,
+            }
+
+        return {
+            "backend": "local",
+            "engine": "faster-whisper",
+            "model": self._settings.local_model_name,
+            "device": self._active_local_device or self._settings.local_device,
+            "compute": self._active_local_compute or self._settings.local_compute_type,
+        }

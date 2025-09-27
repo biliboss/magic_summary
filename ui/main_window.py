@@ -25,12 +25,14 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QSplitter,
     QTextEdit,
+    QFrame,
+    QTabWidget,
     QToolBar,
     QVBoxLayout,
     QWidget,
 )
 
-from core.models import ProcessingStatus, TopicSummary, VideoSummary
+from core.models import ProcessingStatus, TopicSummary, VideoSummary, TranscriptSegment
 
 
 class MainWindow(QMainWindow):
@@ -46,6 +48,7 @@ class MainWindow(QMainWindow):
         self._create_content()
         self._is_busy = False
         self._current_file: Optional[Path] = None
+        self._segments: list[TranscriptSegment] | None = None
 
     def _create_actions(self) -> None:
         self.action_import = QAction("Importar vídeo", self)
@@ -84,6 +87,18 @@ class MainWindow(QMainWindow):
         self.info_label.setVisible(False)
         layout.addWidget(self.info_label)
 
+        self.backend_frame = QFrame()
+        backend_layout = QHBoxLayout(self.backend_frame)
+        backend_layout.setContentsMargins(0, 0, 0, 0)
+        backend_layout.setSpacing(12)
+
+        self.backend_label = QLabel()
+        self.backend_label.setAlignment(Qt.AlignCenter)
+        backend_layout.addWidget(self.backend_label, alignment=Qt.AlignCenter)
+
+        self.backend_frame.setVisible(False)
+        layout.addWidget(self.backend_frame)
+
         self.splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(self.splitter, stretch=1)
 
@@ -106,9 +121,16 @@ class MainWindow(QMainWindow):
         self.summary_box.setReadOnly(True)
         right_layout.addWidget(self.summary_box)
 
-        self.transcript_box = QTextEdit()
-        self.transcript_box.setReadOnly(True)
-        right_layout.addWidget(self.transcript_box)
+        self.tabs = QTabWidget()
+        right_layout.addWidget(self.tabs)
+
+        self.highlights_box = QTextEdit()
+        self.highlights_box.setReadOnly(True)
+        self.tabs.addTab(self.highlights_box, "Highlights")
+
+        self.raw_transcript_box = QTextEdit()
+        self.raw_transcript_box.setReadOnly(True)
+        self.tabs.addTab(self.raw_transcript_box, "Transcrição")
 
         self.splitter.addWidget(right_panel)
         self.setCentralWidget(container)
@@ -142,20 +164,25 @@ class MainWindow(QMainWindow):
     def reset_results(self) -> None:
         self.topic_list.clear()
         self.summary_box.clear()
-        self.transcript_box.clear()
+        self.highlights_box.clear()
+        self.raw_transcript_box.clear()
         self.player_placeholder.setPlainText("[PLAYER DE VÍDEO]\n(placeholder)")
         self.info_label.clear()
         self.info_label.setVisible(False)
+        self._segments = None
+        self.backend_label.clear()
+        self.backend_frame.setVisible(False)
 
     def show_error(self, message: str) -> None:
         QMessageBox.critical(self, "Erro", message)
         self.progress.setVisible(False)
         self.label_status.setText("Não foi possível processar o vídeo")
+        self.statusBar().clearMessage()
 
     def display_summary(self, summary: VideoSummary) -> None:
         self.topic_list.clear()
         self.summary_box.clear()
-        self.transcript_box.clear()
+        self.highlights_box.clear()
 
         if not summary.topics:
             self.summary_box.setPlainText("Nenhum tópico identificado")
@@ -163,16 +190,16 @@ class MainWindow(QMainWindow):
 
         for topic in summary.topics:
             item = QListWidgetItem(f"{topic.title} ({topic.timestamp})")
-            self.topic_list.addItem(item)
             item.setData(Qt.UserRole, topic)
+            self.topic_list.addItem(item)
 
-        self.summary_box.setPlainText("\n\n".join(
-            f"# {topic.title}\n{topic.description}" for topic in summary.topics
-        ))
+        self.summary_box.setPlainText(
+            "\n\n".join(f"# {topic.title}\n{topic.description}" for topic in summary.topics)
+        )
 
         self._populate_transcript(summary)
+        self.tabs.setCurrentWidget(self.highlights_box)
 
-    # Slots -----------------------------------------------------
     def _on_topic_clicked(self, item: QListWidgetItem) -> None:
         topic: TopicSummary = item.data(Qt.UserRole)
         # TODO: Integrate with VLC player seek
@@ -195,7 +222,30 @@ class MainWindow(QMainWindow):
                     f"[{highlight.timestamp}] {highlight.title}: \"{highlight.quote}\""
                 )
         if highlights_text:
-            self.transcript_box.setPlainText("\n".join(highlights_text))
+            self.highlights_box.setPlainText("\n".join(highlights_text))
+        else:
+            self.highlights_box.clear()
+
+    def set_raw_transcript(self, text: str) -> None:
+        self.raw_transcript_box.setPlainText(text)
+
+    def cache_segments(self, segments: list[TranscriptSegment]) -> None:
+        self._segments = segments
+
+    def set_backend_info(self, info: dict) -> None:
+        backend = info.get("backend", "?")
+        if backend == "openai":
+            model = info.get("model") or "-"
+            self.backend_label.setText(f"Backend: OpenAI • Modelo: {model}")
+        else:
+            engine = info.get("engine", "local")
+            model = info.get("model") or "-"
+            device = info.get("device") or "?"
+            compute = info.get("compute") or "?"
+            self.backend_label.setText(
+                f"Backend: {engine} ({backend}) • Modelo: {model} • Dispositivo: {device} • Precisão: {compute}"
+            )
+        self.backend_frame.setVisible(True)
 
 
 if __name__ == "__main__":
