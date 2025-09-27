@@ -22,13 +22,13 @@ class TranscriptSegment(BaseModel):
 
 class TopicHighlight(BaseModel):
     title: str = Field(..., max_length=120)
-    timestamp: str = Field(..., regex=r"^\d{2}:\d{2}$")
+    timestamp: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     quote: str = Field(..., max_length=280)
 
 
 class TopicSummary(BaseModel):
     title: str
-    timestamp: str = Field(..., regex=r"^\d{2}:\d{2}$")
+    timestamp: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     description: str
     highlights: List[TopicHighlight] = Field(default_factory=list)
 

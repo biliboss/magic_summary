@@ -7,6 +7,8 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
+from shutil import which
+
 APP_ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -40,3 +42,31 @@ def get_openai_settings() -> OpenAISettings:
         model_transcription=model_transcription,
         model_summary=model_summary,
     )
+
+
+def get_ffmpeg_path() -> Path:
+    """Resolve the ffmpeg executable path.
+
+    Priority order:
+    1. `FFMPEG_BIN` environment variable (absolute path).
+    2. System PATH lookup via `which`.
+    """
+
+    load_environment()
+    from os import getenv
+
+    env_path = getenv("FFMPEG_BIN")
+    if env_path:
+        ffmpeg_path = Path(env_path)
+        if not ffmpeg_path.exists():
+            raise RuntimeError(
+                f"FFMPEG_BIN is set to '{env_path}', but the file does not exist."
+            )
+        return ffmpeg_path
+
+    discovered = which("ffmpeg")
+    if not discovered:
+        raise RuntimeError(
+            "ffmpeg executable not found. Set FFMPEG_BIN in the environment or add ffmpeg to PATH."
+        )
+    return Path(discovered)
