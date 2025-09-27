@@ -21,9 +21,14 @@ def load_environment(dotenv_path: Optional[Path] = None) -> None:
 
 @dataclass
 class OpenAISettings:
-    api_key: str
-    model_transcription: str = "whisper-1"
-    model_summary: str = "gpt-4o-mini"
+    api_key: str | None = None
+    model_transcription: str = "gpt-4o-mini-transcribe"
+    model_summary: str = "gpt-4.1-mini"
+    transcription_backend: str = "openai"
+    local_model_name: str = "base"
+    local_device: str = "cpu"  # Forçado para CPU para evitar erros de CUDA no Windows
+    local_compute_type: str = "float32"  # Forçado para float32, compatível sem CUDA
+    local_download_root: str | None = None
 
 
 def get_openai_settings() -> OpenAISettings:
@@ -31,16 +36,47 @@ def get_openai_settings() -> OpenAISettings:
     from os import getenv
 
     api_key = getenv("OPENAI_API_KEY")
-    if not api_key:
+    model_transcription = getenv("OPENAI_WHISPER_MODEL", OpenAISettings.model_transcription)
+    model_summary = getenv("OPENAI_SUMMARY_MODEL", OpenAISettings.model_summary)
+
+    backend_env = getenv("TRANSCRIPTION_BACKEND")
+    transcription_backend = (
+        backend_env.lower() if backend_env else OpenAISettings.transcription_backend
+    )
+
+    if transcription_backend == "openai" and not api_key:
         raise RuntimeError(
             "OPENAI_API_KEY is not set. Please configure it in the .env file."
         )
-    model_transcription = getenv("OPENAI_WHISPER_MODEL", OpenAISettings.model_transcription)
-    model_summary = getenv("OPENAI_SUMMARY_MODEL", OpenAISettings.model_summary)
+    if transcription_backend not in {"openai", "local"}:
+        raise RuntimeError(
+            "TRANSCRIPTION_BACKEND inválido. Use 'openai' ou 'local'."
+        )
+
+    local_model_name = getenv("LOCAL_WHISPER_MODEL", OpenAISettings.local_model_name)
+    local_device = getenv("LOCAL_WHISPER_DEVICE", OpenAISettings.local_device)
+    local_compute_type = getenv("LOCAL_WHISPER_COMPUTE", OpenAISettings.local_compute_type)
+    local_download_root = getenv("LOCAL_WHISPER_CACHE", None)
+
+    # Força CPU se backend local e qualquer indício de auto ou GPU problemática
+    if transcription_backend == "local":
+        if local_device.lower() in {"auto", "cuda"}:
+            local_device = "cpu"
+            local_compute_type = "float32"
+        # Verificação adicional: se não há CUDA_VISIBLE_DEVICES, força CPU
+        if getenv("CUDA_VISIBLE_DEVICES") is None:
+            local_device = "cpu"
+            local_compute_type = "float32"
+
     return OpenAISettings(
         api_key=api_key,
         model_transcription=model_transcription,
         model_summary=model_summary,
+        transcription_backend=transcription_backend,
+        local_model_name=local_model_name,
+        local_device=local_device,
+        local_compute_type=local_compute_type,
+        local_download_root=local_download_root,
     )
 
 

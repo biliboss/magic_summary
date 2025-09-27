@@ -20,3 +20,4 @@ uv.lock
 # Logs
 logs/
 *.log
+.aider*

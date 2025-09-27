@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Optional
 
 import sys
 
@@ -40,9 +40,12 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle("Video Feedback Summarizer")
         self.resize(1200, 720)
+        self.statusBar()
         self._create_actions()
         self._create_toolbar()
         self._create_content()
+        self._is_busy = False
+        self._current_file: Optional[Path] = None
 
     def _create_actions(self) -> None:
         self.action_import = QAction("Importar vídeo", self)
@@ -75,6 +78,11 @@ class MainWindow(QMainWindow):
         self.button_import = QPushButton("Importar vídeo")
         self.button_import.clicked.connect(self.open_file_dialog)
         layout.addWidget(self.button_import, alignment=Qt.AlignCenter)
+
+        self.info_label = QLabel()
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setVisible(False)
+        layout.addWidget(self.info_label)
 
         self.splitter = QSplitter(Qt.Horizontal)
         layout.addWidget(self.splitter, stretch=1)
@@ -126,6 +134,19 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(False)
         self.label_status.setText("Processamento concluído")
 
+    def set_busy(self, busy: bool) -> None:
+        self._is_busy = busy
+        self.button_import.setEnabled(not busy)
+        self.action_import.setEnabled(not busy)
+
+    def reset_results(self) -> None:
+        self.topic_list.clear()
+        self.summary_box.clear()
+        self.transcript_box.clear()
+        self.player_placeholder.setPlainText("[PLAYER DE VÍDEO]\n(placeholder)")
+        self.info_label.clear()
+        self.info_label.setVisible(False)
+
     def show_error(self, message: str) -> None:
         QMessageBox.critical(self, "Erro", message)
         self.progress.setVisible(False)
@@ -149,6 +170,24 @@ class MainWindow(QMainWindow):
             f"# {topic.title}\n{topic.description}" for topic in summary.topics
         ))
 
+        self._populate_transcript(summary)
+
+    # Slots -----------------------------------------------------
+    def _on_topic_clicked(self, item: QListWidgetItem) -> None:
+        topic: TopicSummary = item.data(Qt.UserRole)
+        # TODO: Integrate with VLC player seek
+        self.statusBar().showMessage(f"Jump to {topic.timestamp}")
+
+    def set_file_info(self, file_path: Path, duration: float | None = None) -> None:
+        self._current_file = file_path
+        parts = [file_path.name]
+        if duration is not None:
+            minutes, seconds = divmod(int(duration), 60)
+            parts.append(f"duração {minutes:02d}:{seconds:02d}")
+        self.info_label.setText(" • ".join(parts))
+        self.info_label.setVisible(True)
+
+    def _populate_transcript(self, summary: VideoSummary) -> None:
         highlights_text = []
         for topic in summary.topics:
             for highlight in topic.highlights:
@@ -157,12 +196,6 @@ class MainWindow(QMainWindow):
                 )
         if highlights_text:
             self.transcript_box.setPlainText("\n".join(highlights_text))
-
-    # Slots -----------------------------------------------------
-    def _on_topic_clicked(self, item: QListWidgetItem) -> None:
-        topic: TopicSummary = item.data(Qt.UserRole)
-        # TODO: Integrate with VLC player seek
-        self.statusBar().showMessage(f"Jump to {topic.timestamp}")
 
 
 if __name__ == "__main__":
