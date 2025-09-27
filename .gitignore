@@ -1,0 +1,22 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Tooling
+.python-version
+uv.lock
+
+# Media artifacts
+*.mkv
+*.mp4
+*.mov
+
+# Logs
+logs/
+*.log
