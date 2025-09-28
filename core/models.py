@@ -21,15 +21,18 @@ class TranscriptSegment(BaseModel):
 
 
 class TopicHighlight(BaseModel):
-    title: str = Field(..., max_length=120)
+    # Allow longer titles and quotes as the new prompt requests more detail.
+    title: str = Field(..., max_length=200)
     timestamp: str = Field(..., pattern=r"^\d{2}:\d{2}$")
-    quote: str = Field(..., max_length=280)
+    quote: str = Field(..., max_length=500)
 
 
 class TopicSummary(BaseModel):
     title: str
     timestamp: str = Field(..., pattern=r"^\d{2}:\d{2}$")
     description: str
+    # Optional short sentence describing the impact/importance of the topic.
+    impact_assessment: str | None = None
     highlights: List[TopicHighlight] = Field(default_factory=list)
 
 
