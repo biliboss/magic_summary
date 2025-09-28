@@ -1,0 +1,1525 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+.windsurf/rules/main.md
+core/config.py
+core/models.py
+core/storage.py
+core/summarization.py
+core/transcription.py
+docs/prd.md
+docs/ui.md
+main.py
+pyproject.toml
+ui/controller.py
+ui/main_window.py
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="core/storage.py">
+"""Persistence helpers for cached transcripts and summaries."""
+from __future__ import annotations
+
+import json
+import hashlib
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Iterable, Sequence
+
+from .models import TranscriptSegment, VideoSummary, SummaryMetadata
+
+CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "transcripts"
+
+
+@dataclass(frozen=True)
+class TranscriptFingerprint:
+    size: int
+    mtime_ns: int
+
+    @classmethod
+    def from_path(cls, path: Path) -> "TranscriptFingerprint":
+        stat = path.stat()
+        return cls(size=stat.st_size, mtime_ns=int(stat.st_mtime_ns))
+
+    def to_dict(self) -> dict[str, int]:
+        return {"size": self.size, "mtime_ns": self.mtime_ns}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, int]) -> "TranscriptFingerprint":
+        return cls(size=int(data["size"]), mtime_ns=int(data["mtime_ns"]))
+
+
+def _ensure_cache_dir() -> Path:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    return CACHE_DIR
+
+
+def _fingerprint_path(video_path: Path) -> Path:
+    fingerprint = TranscriptFingerprint.from_path(video_path)
+    payload = f"{video_path.resolve()}::{fingerprint.size}::{fingerprint.mtime_ns}"
+    digest = hashlib.sha1(payload.encode("utf-8")).hexdigest()
+    return _ensure_cache_dir() / f"{digest}.json"
+
+
+def _read_cache(video_path: Path) -> tuple[Path, dict[str, Any]]:
+    cache_path = _fingerprint_path(video_path)
+    if not cache_path.exists():
+        return cache_path, {}
+
+    try:
+        payload = json.loads(cache_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        cache_path.unlink(missing_ok=True)
+        return cache_path, {}
+
+    fingerprint_data = payload.get("fingerprint")
+    if not fingerprint_data:
+        cache_path.unlink(missing_ok=True)
+        return cache_path, {}
+
+    try:
+        stored_fp = TranscriptFingerprint.from_dict(fingerprint_data)
+    except (KeyError, TypeError, ValueError):
+        cache_path.unlink(missing_ok=True)
+        return cache_path, {}
+
+    current_fp = TranscriptFingerprint.from_path(video_path)
+    if stored_fp != current_fp:
+        cache_path.unlink(missing_ok=True)
+        return cache_path, {}
+
+    return cache_path, payload
+
+
+def _prepare_cache(video_path: Path) -> tuple[Path, dict[str, Any], TranscriptFingerprint]:
+    cache_path, payload = _read_cache(video_path)
+    fingerprint = TranscriptFingerprint.from_path(video_path)
+    payload["video"] = str(video_path.resolve())
+    payload["fingerprint"] = fingerprint.to_dict()
+    return cache_path, payload, fingerprint
+
+
+def load_transcript(video_path: Path) -> list[TranscriptSegment] | None:
+    _, payload = _read_cache(video_path)
+    if not payload:
+        return None
+
+    segments_data = payload.get("segments", [])
+    try:
+        return [TranscriptSegment.model_validate(seg) for seg in segments_data]
+    except Exception:
+        return None
+
+
+def save_transcript(video_path: Path, segments: Sequence[TranscriptSegment]) -> None:
+    cache_path, data, _ = _prepare_cache(video_path)
+    data["segments"] = [seg.model_dump() for seg in segments]
+    cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def load_summary(video_path: Path) -> tuple[VideoSummary | None, SummaryMetadata | None]:
+    _, payload = _read_cache(video_path)
+    if not payload:
+        return None, None
+
+    summary_data = payload.get("summary")
+    if not summary_data:
+        meta_dict = payload.get("metadata", {}).get("summary")
+        if meta_dict:
+            try:
+                return None, SummaryMetadata.model_validate(meta_dict)
+            except Exception:
+                return None, None
+        return None, None
+
+    try:
+        summary = VideoSummary.model_validate(summary_data)
+    except Exception:
+        meta_dict = payload.get("metadata", {}).get("summary")
+        if meta_dict:
+            try:
+                return None, SummaryMetadata.model_validate(meta_dict)
+            except Exception:
+                return None, None
+        return None, None
+
+    meta_dict = payload.get("metadata", {}).get("summary")
+    metadata = None
+    if meta_dict:
+        try:
+            metadata = SummaryMetadata.model_validate(meta_dict)
+        except Exception:
+            metadata = None
+    return summary, metadata
+
+
+def save_summary(
+    video_path: Path,
+    summary: VideoSummary,
+    *,
+    metadata: SummaryMetadata | None = None,
+) -> None:
+    cache_path, data, _ = _prepare_cache(video_path)
+    data["summary"] = summary.model_dump()
+    if metadata:
+        meta_section = data.setdefault("metadata", {})
+        meta_section["summary"] = metadata.model_dump()
+    cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_summary(video_path: Path) -> None:
+    cache_path, data = _read_cache(video_path)
+    if not data:
+        return
+    data.pop("summary", None)
+    meta = data.get("metadata")
+    if isinstance(meta, dict):
+        meta.pop("summary", None)
+    cache_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def transcript_to_text(segments: Iterable[TranscriptSegment]) -> str:
+    lines: list[str] = []
+    for seg in segments:
+        text = seg.text.strip()
+        if not text:
+            continue
+        lines.append(text)
+    return "\n".join(lines)
+</file>
+
+<file path="core/summarization.py">
+"""Summarization service using OpenAI + instructor for structured outputs."""
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from typing import Sequence
+
+from instructor import from_openai
+from openai import OpenAI
+
+from .config import get_openai_settings
+from .models import TranscriptSegment, VideoSummary, SummaryMetadata, format_timestamp
+
+
+HIGHLIGHT_PROMPT = (
+    "You are an expert product analyst summarizing usability feedback videos.\n"
+    "Transform the provided transcript segments into a structured `VideoSummary`.\n\n"
+    "Guidelines:\n"
+    "- Do not limit the number of topics; include as many as needed.\n"
+    "- Each topic (`TopicSummary`) must have: title (<=120 chars), timestamp (MM:SS), description, and highlights[].\n"
+    "- Each highlight (`TopicHighlight`) must have: title (<=120 chars), timestamp (MM:SS), quote (<=280 chars).\n"
+    "- If the same issue appears multiple times, merge into one topic and include multiple highlights.\n"
+    "- Order topics chronologically by their first occurrence.\n"
+    "- Quotes must be literal from the transcript (truncate with … if needed).\n"
+    "- Focus on actionable UX/technical problems or suggestions relevant to product/engineering.\n"
+    "- Do not invent details beyond the transcript.\n"
+    "- Use the transcript’s language.\n"
+)
+
+PROMPT_VERSION = "2025-09-27"
+
+
+class SummarizationService:
+    def __init__(self, client: OpenAI | None = None):
+        settings = get_openai_settings()
+        base_client = client or OpenAI(api_key=settings.api_key)
+        self._client = from_openai(base_client)
+        self._model = settings.model_summary
+        self._prompt_version = PROMPT_VERSION
+
+    @property
+    def prompt_version(self) -> str:
+        return self._prompt_version
+
+    def summarize(self, segments: Sequence[TranscriptSegment]) -> VideoSummary:
+        if not segments:
+            return VideoSummary(topics=[])
+
+        transcript_as_text = "\n".join(
+            f"[{format_timestamp(seg.start)}] {seg.text.strip()}"
+            for seg in segments
+            if seg.text.strip()
+        )
+
+        user_prompt = f"{HIGHLIGHT_PROMPT}\n\nTranscript:\n{transcript_as_text}"
+
+        response: VideoSummary = self._client.chat.completions.create(
+            model=self._model,
+            temperature=0.2,
+            response_model=VideoSummary,  # instructor faz binding direto
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You return only valid JSON that matches the `VideoSummary` schema.",
+                },
+                {"role": "user", "content": user_prompt},
+            ],
+        )
+        return response
+
+    def build_metadata(self) -> SummaryMetadata:
+        return SummaryMetadata(
+            prompt_version=self._prompt_version,
+            regenerated_at=datetime.now(timezone.utc).isoformat(),
+            backend_model=self._model,
+        )
+</file>
+
+<file path="docs/prd.md">
+# PRD – Video Feedback Summarizer (Desktop App)
+
+## 1. Objetivo
+Permitir que usuários importem vídeos de feedback (reuniões, apresentações, entrevistas), tenham a transcrição automática, um sumário com tópicos clicáveis e navegação direta no vídeo.
+
+---
+
+## 2. Público-alvo
+- Times de produto/UX que recebem feedback em vídeo.
+- Pequenas equipes que precisam consumir feedback de forma rápida.
+
+---
+
+## 3. Escopo da V1
+- **Input:** upload/drag&drop de arquivos de vídeo locais (MP4, MKV, MOV).
+- **Processamento:**
+  - Transcrição automática via Whisper (OpenAI).
+  - Geração de sumário estruturado em tópicos com timestamps.
+- **Output UX:**
+  - Player embutido simples (play/pause, barra de progresso).
+  - Lista lateral de tópicos clicáveis → ao clicar, o player pula pro ponto do vídeo.
+  - Exportar transcrição completa em `.txt`.
+
+---
+
+## 4. Requisitos Técnicos
+
+### Linguagem & Framework
+- **Python 3.11+**
+- **Interface:** PySide6 ou PyQt6 (GUI desktop cross-platform).
+- **Player de vídeo:** VLC python bindings (`python-vlc`) para estabilidade.
+- **IA:**  
+  - OpenAI Whisper para transcrição (`whisper` lib).  
+  - OpenAI GPT para sumarização (API ou modelo local).
+
+### Estrutura Interna
+- `ui/` → componentes gráficos (janela principal, player, lista de tópicos).
+- `core/` → lógica de transcrição e resumo.
+- `export/` → funções de exportação (txt/json).
+- `assets/` → ícones, estilo da interface.
+
+---
+
+## 5. UX Flow
+
+### Tela Inicial
+- Janela limpa com botão central: “Importar vídeo” + suporte a drag&drop.
+- Ao selecionar vídeo → preview carregado no player.
+
+### Processamento
+- Barra de progresso + loading state (“Transcrevendo…” → “Gerando sumário…”).
+- Mensagens claras (sem jargão técnico).
+
+### Resultado
+- **Lado esquerdo:** Player do vídeo.  
+- **Lado direito:** Lista de tópicos (ex: “1. Problema na tela de login [00:01:23]”).  
+- Clique no tópico → vídeo pula para o timestamp correspondente.  
+- Botão “Exportar Transcrição” no rodapé.
+
+---
+
+## 6. Critérios de Aceite
+- Upload de vídeos até 1h processados sem crash.
+- Transcrição automática exibida corretamente.
+- Sumário deve ter no mínimo 5 tópicos para vídeos >5min.
+- Clicar em um tópico deve levar ao ponto exato do vídeo.
+- Exportação `.txt` deve conter texto completo da transcrição.
+
+---
+
+## 7. Limitações da V1
+- Não há edição manual dos tópicos.
+- Apenas exportação `.txt` (sem PDF/Word).
+- Interface simples, sem temas customizados.
+- Apenas idioma **português/inglês** (dependente do Whisper).
+
+---
+
+## 8. Futuro (fora da V1)
+- Exportação multi-formato (PDF, Word).
+- Edição manual dos tópicos.
+- Multi-idioma automático.
+- Integração com ferramentas de time (Notion, Slack, Jira).
+</file>
+
+<file path="docs/ui.md">
+========================================================
+[TELA 1 – INICIAL]
+========================================================
++------------------------------------------------------+
+|               Video Feedback Summarizer              |
+|                                                      |
+|   +--------------------------------------------+     |
+|   |  [ Importar vídeo ]                        |     |
+|   |  (ou arraste o arquivo aqui)               |     |
+|   +--------------------------------------------+     |
+|                                                      |
+|                         [Ajuda]   [Sair]             |
++------------------------------------------------------+
+
+========================================================
+[TELA 2 – PROCESSAMENTO]
+========================================================
++------------------------------------------------------+
+| [NOME_DO_ARQUIVO.mp4]                                |
+|                                                      |
+|   Status: Transcrevendo áudio... (###.... 45%)       |
+|                                                      |
+|   [ Barra de progresso ====================>   ]     |
+|                                                      |
+|   Duração do vídeo: 12:45                            |
+|                                                      |
++------------------------------------------------------+
+
+========================================================
+[TELA 3 – RESULTADO]
+========================================================
++------------------------------------------------------+
+|  [PLAYER DE VÍDEO]        |  [SUMÁRIO DE TÓPICOS]    |
+|  +--------------------+   |  1. Problema login       |
+|  |   ▶  |██████----|  |   |     (00:01:23)           |
+|  | Barra de progresso |   |  2. Sugestão checkout    |
+|  | 00:00 / 12:45      |   |     (00:03:45)           |
+|  +--------------------+   |  3. UX do menu inicial   |
+|                           |     (00:05:10)           |
+|                           |  4. Bug carrinho vazio   |
+|                           |     (00:08:32)           |
+|                           |  5. Feedback geral       |
+|                           |     (00:11:00)           |
++------------------------------------------------------+
+|  [ Exportar Transcrição (.txt) ]                     |
++------------------------------------------------------+
+
+========================================================
+[TELA 4 – ERRO (FALLBACK)]
+========================================================
++------------------------------------------------------+
+|                     ⚠ ERRO ⚠                         |
+|  Não foi possível processar o vídeo.                 |
+|                                                      |
+|  [ Tentar novamente ]    [ Voltar à tela inicial ]   |
++------------------------------------------------------+
+
+
+TELA 3 Revisada
+
+========================================================
+[TELA 3 – RESULTADO (LAYOUT 3 COLUNAS)]
+========================================================
++-----------------------------------------------------------------------------------+
+| [PLAYER DE VÍDEO]      | [TÓPICOS]                       | [RESUMO & TRANSCRIÇÃO] |
+| +-------------------+  | 1. Problema login (00:01:23)    | +-------------------+  |
+| |   ▶ |█████----|  |  | 2. Sugestão checkout (00:03:45) | | RESUMO GERAL (IA) |  |
+| | Barra de progresso|  | 3. UX menu inicial (00:05:10)   | | - Problema login   |  |
+| | 00:00 / 12:45     |  | 4. Bug carrinho (00:08:32)      | | - Checkout confuso |  |
+| +-------------------+  | 5. Feedback geral (00:11:00)    | | - Bug carrinho     |  |
+|                       |                                  | +-------------------+  |
+|                       | (clique → atualiza Coluna 3)     | [TRANSCRIÇÃO REAL]    |
+|                       |                                  | [00:01:23] "App trava"| 
+|                       |                                  | [00:01:35] "Todos..." | 
+|                       |                                  | ...                   |
++-----------------------------------------------------------------------------------+
+| [ Exportar TXT ] [ Exportar Resumo ]                                              |
++-----------------------------------------------------------------------------------+
+</file>
+
+<file path=".windsurf/rules/main.md">
+---
+trigger: always_on
+---
+
+- Use uv env
+- Python
+- System to transcribe and highlight important parts
+- Commit relevant advances
+</file>
+
+<file path="core/models.py">
+"""Domain models for transcripts and summaries."""
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import List
+
+from pydantic import BaseModel, Field, validator
+
+
+class TranscriptSegment(BaseModel):
+    start: float = Field(..., description="Start time in seconds")
+    end: float = Field(..., description="End time in seconds")
+    text: str
+
+    @property
+    def duration(self) -> float:
+        return max(0.0, self.end - self.start)
+
+    def to_timestamp_label(self) -> str:
+        return format_timestamp(self.start)
+
+
+class TopicHighlight(BaseModel):
+    title: str = Field(..., max_length=120)
+    timestamp: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    quote: str = Field(..., max_length=280)
+
+
+class TopicSummary(BaseModel):
+    title: str
+    timestamp: str = Field(..., pattern=r"^\d{2}:\d{2}$")
+    description: str
+    highlights: List[TopicHighlight] = Field(default_factory=list)
+
+
+class VideoSummary(BaseModel):
+    topics: List[TopicSummary] = Field(default_factory=list)
+
+    @property
+    def total_topics(self) -> int:
+        return len(self.topics)
+
+
+class SummaryMetadata(BaseModel):
+    prompt_version: str | None = None
+    regenerated_at: str | None = None
+    backend_model: str | None = None
+    extra: dict = Field(default_factory=dict)
+
+
+class ProcessingStatus(BaseModel):
+    status: str
+    progress: float = Field(0.0, ge=0.0, le=1.0)
+    message: str | None = None
+
+
+def format_timestamp(seconds: float) -> str:
+    td = timedelta(seconds=int(seconds))
+    minutes, secs = divmod(td.seconds, 60)
+    return f"{minutes:02d}:{secs:02d}"
+</file>
+
+<file path="main.py">
+from __future__ import annotations
+
+import logging
+import sys
+
+from PySide6.QtWidgets import QApplication
+
+from ui.main_window import MainWindow
+from ui.controller import ProcessingController
+
+
+def main() -> int:
+    logging.basicConfig(level=logging.INFO)
+
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    ProcessingController(window)
+    window.show()
+    return app.exec()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
+</file>
+
+<file path="pyproject.toml">
+[project]
+name = "magic-summary"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "instructor>=1.11.3",
+    "openai>=1.109.1",
+    "pydantic>=2.9.2",
+    "faster-whisper>=1.0.3",
+    "pyside6>=6.9.2",
+    "python-dotenv>=1.1.1",
+    "python-vlc>=3.0.21203",
+]
+</file>
+
+<file path="ui/controller.py">
+"""Qt controller wiring transcription and summarization services to the UI."""
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import Optional, TYPE_CHECKING
+
+from PySide6.QtCore import QObject, QThread, Signal, Slot
+
+from core.models import ProcessingStatus, VideoSummary, TranscriptSegment, SummaryMetadata
+from core.summarization import SummarizationService
+from core.transcription import TranscriptionService
+from core.storage import (
+    load_transcript,
+    save_transcript,
+    transcript_to_text,
+    load_summary,
+    save_summary,
+    clear_summary,
+)
+
+if TYPE_CHECKING:  # pragma: no cover
+    from .main_window import MainWindow
+
+logger = logging.getLogger(__name__)
+
+
+class ProcessingWorker(QObject):
+    """Background worker that runs transcription and summarization."""
+
+    status = Signal(object)
+    summary_ready = Signal(object)
+    segments_ready = Signal(object)
+    transcript_text_ready = Signal(str)
+    backend_info_ready = Signal(dict)
+    summary_metadata_ready = Signal(object)
+    error = Signal(str)
+    finished = Signal()
+
+    def __init__(
+        self,
+        video_path: Path,
+        transcription_service: TranscriptionService,
+        summarization_service: SummarizationService,
+        cached_segments: list[TranscriptSegment] | None = None,
+        cached_summary: VideoSummary | None = None,
+        cached_summary_meta: SummaryMetadata | None = None,
+        force_regenerate: bool = False,
+    ) -> None:
+        super().__init__()
+        self._video_path = Path(video_path)
+        self._transcription_service = transcription_service
+        self._summarization_service = summarization_service
+        self._cached_segments = cached_segments
+        self._cached_summary = cached_summary
+        self._cached_summary_meta = cached_summary_meta
+        self._force_regenerate = force_regenerate
+
+    def _on_status(self, status: ProcessingStatus) -> None:
+        self.status.emit(status)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            if self._cached_segments is not None:
+                segments = self._cached_segments
+                self._on_status(
+                    ProcessingStatus(
+                        status="transcribing",
+                        progress=0.4,
+                        message="Transcrição carregada do cache",
+                    )
+                )
+            else:
+                segments = self._transcription_service.transcribe(
+                    self._video_path,
+                    status_cb=self._on_status,
+                )
+                try:
+                    save_transcript(self._video_path, segments)
+                except Exception as exc:  # pragma: no cover - best effort cache write
+                    logger.warning("Não foi possível salvar cache da transcrição: %s", exc)
+
+            self.segments_ready.emit(segments)
+            self.transcript_text_ready.emit(transcript_to_text(segments))
+            backend_info = self._transcription_service.get_backend_metadata()
+            self.backend_info_ready.emit(backend_info)
+
+            if self._cached_summary is not None and not self._force_regenerate:
+                self._on_status(
+                    ProcessingStatus(
+                        status="complete",
+                        progress=1.0,
+                        message="Resumo carregado do cache",
+                    )
+                )
+                if self._cached_summary_meta is not None:
+                    self.summary_metadata_ready.emit(self._cached_summary_meta)
+                self.summary_ready.emit(self._cached_summary)
+                return
+
+            self._on_status(
+                ProcessingStatus(
+                    status="summarizing",
+                    progress=0.9,
+                    message="Gerando highlights",
+                )
+            )
+            summary = self._summarization_service.summarize(segments)
+            metadata = self._summarization_service.build_metadata()
+            metadata.extra["transcription_backend"] = backend_info
+            try:
+                save_summary(self._video_path, summary, metadata=metadata)
+            except Exception as exc:  # pragma: no cover - cache write best effort
+                logger.warning("Não foi possível salvar cache do resumo: %s", exc)
+            self._on_status(
+                ProcessingStatus(
+                    status="complete",
+                    progress=1.0,
+                    message="Resumo concluído",
+                )
+            )
+            self.summary_metadata_ready.emit(metadata)
+            self.summary_ready.emit(summary)
+        except Exception as exc:  # pylint: disable=broad-except
+            logger.exception("Erro no processamento do vídeo: %s", exc)
+            self.error.emit(str(exc))
+        finally:
+            self.finished.emit()
+
+
+class ProcessingController(QObject):
+    """Coordinates user actions with the domain services."""
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        transcription_service: Optional[TranscriptionService] = None,
+        summarization_service: Optional[SummarizationService] = None,
+    ) -> None:
+        super().__init__(window)
+        self._window = window
+        self._transcription = transcription_service or TranscriptionService()
+        self._summarizer = summarization_service or SummarizationService()
+        self._thread: Optional[QThread] = None
+        self._worker: Optional[ProcessingWorker] = None
+        self._current_video: Optional[Path] = None
+
+        self._window.request_transcription.connect(self.process_video)
+
+    @Slot(Path)
+    def process_video(self, video_path: Path) -> None:
+        self._start_processing(Path(video_path), force_regenerate=False)
+
+    def regenerate_summary(self) -> None:
+        if self._thread and self._thread.isRunning():
+            self._window.show_error("Já existe um processamento em andamento.")
+            return
+        if not self._current_video:
+            self._window.show_error("Nenhum vídeo carregado para regerar.")
+            return
+        self._start_processing(self._current_video, force_regenerate=True)
+
+    def _start_processing(self, video_path: Path, *, force_regenerate: bool) -> None:
+        if self._thread and self._thread.isRunning():
+            self._window.show_error("Já existe um processamento em andamento.")
+            return
+
+        if not video_path.exists():
+            self._window.show_error(f"Arquivo não encontrado: {video_path}")
+            return
+
+        self._current_video = video_path
+
+        cached_segments = load_transcript(video_path)
+        cached_text = transcript_to_text(cached_segments) if cached_segments else None
+        cached_summary, cached_summary_meta = load_summary(video_path)
+
+        if force_regenerate:
+            clear_summary(video_path)
+            cached_summary = None
+            cached_summary_meta = None
+
+        self._window.reset_results()
+        self._window.set_busy(True)
+        self._window.set_file_info(video_path)
+
+        if cached_segments:
+            self._window.set_processing(
+                ProcessingStatus(
+                    status="transcribing",
+                    progress=0.3,
+                    message="Transcrição carregada do cache",
+                )
+            )
+            if cached_text:
+                self._window.set_raw_transcript(cached_text)
+        else:
+            self._window.set_processing(
+                ProcessingStatus(
+                    status="preparing",
+                    progress=0.05,
+                    message=f"Preparando {video_path.name}",
+                )
+            )
+
+        if cached_summary and not force_regenerate:
+            self._window.set_processing(
+                ProcessingStatus(
+                    status="summarizing",
+                    progress=0.95,
+                    message="Resumo carregado do cache",
+                )
+            )
+            self._window.display_summary(cached_summary)
+            if cached_summary_meta:
+                self._window.set_summary_metadata(cached_summary_meta)
+
+        worker = ProcessingWorker(
+            video_path,
+            self._transcription,
+            self._summarizer,
+            cached_segments=cached_segments,
+            cached_summary=cached_summary,
+            cached_summary_meta=cached_summary_meta,
+            force_regenerate=force_regenerate,
+        )
+        thread = QThread(parent=self)
+        worker.moveToThread(thread)
+
+        thread.started.connect(worker.run)
+        worker.status.connect(self._window.set_processing)
+        worker.summary_ready.connect(self._on_summary_ready)
+        worker.segments_ready.connect(self._on_segments_ready)
+        worker.transcript_text_ready.connect(self._window.set_raw_transcript)
+        worker.backend_info_ready.connect(self._window.set_backend_info)
+        worker.summary_metadata_ready.connect(self._window.set_summary_metadata)
+        worker.error.connect(self._handle_error)
+        worker.finished.connect(self._on_finished)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+
+        self._thread = thread
+        self._worker = worker
+
+        logger.info("Iniciando processamento de %s", video_path)
+        thread.start()
+
+    def _on_summary_ready(self, summary: VideoSummary) -> None:
+        self._window.display_summary(summary)
+        self._window.set_ready()
+        self._window.set_busy(False)
+        self._window.statusBar().showMessage("Resumo gerado", 5000)
+
+    def _handle_error(self, message: str) -> None:
+        self._window.show_error(message)
+        self._window.set_busy(False)
+
+    def _on_finished(self) -> None:
+        logger.info("Processamento finalizado")
+        self._thread = None
+        self._worker = None
+
+    def _on_segments_ready(self, segments: list[TranscriptSegment]) -> None:
+        self._window.cache_segments(segments)
+</file>
+
+<file path=".gitignore">
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Tooling
+.python-version
+uv.lock
+data/
+
+# Media artifacts
+*.mkv
+*.mp4
+*.mov
+
+# Logs
+logs/
+*.log
+.aider*
+</file>
+
+<file path="core/config.py">
+"""Application configuration helpers."""
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from dotenv import load_dotenv
+
+from shutil import which
+
+APP_ROOT = Path(__file__).resolve().parent.parent
+
+
+def load_environment(dotenv_path: Optional[Path] = None) -> None:
+    """Load environment variables from a `.env` file if present."""
+    if dotenv_path is None:
+        dotenv_path = APP_ROOT / ".env"
+    load_dotenv(dotenv_path)
+
+
+@dataclass
+class OpenAISettings:
+    api_key: str | None = None
+    model_transcription: str = "gpt-4o-mini-transcribe"
+    model_summary: str = "gpt-5-mini"
+    transcription_backend: str = "openai"
+    local_model_name: str = "base"
+    local_device: str = "cpu"  # Forçado para CPU para evitar erros de CUDA no Windows
+    local_compute_type: str = "float32"  # Forçado para float32, compatível sem CUDA
+    local_download_root: str | None = None
+
+
+def get_openai_settings() -> OpenAISettings:
+    load_environment()
+    from os import getenv
+
+    api_key = getenv("OPENAI_API_KEY")
+    model_transcription = getenv("OPENAI_WHISPER_MODEL", OpenAISettings.model_transcription)
+    model_summary = getenv("OPENAI_SUMMARY_MODEL", OpenAISettings.model_summary)
+
+    backend_env = getenv("TRANSCRIPTION_BACKEND")
+    transcription_backend = (
+        backend_env.lower() if backend_env else OpenAISettings.transcription_backend
+    )
+
+    if transcription_backend == "openai" and not api_key:
+        raise RuntimeError(
+            "OPENAI_API_KEY is not set. Please configure it in the .env file."
+        )
+    if transcription_backend not in {"openai", "local"}:
+        raise RuntimeError(
+            "TRANSCRIPTION_BACKEND inválido. Use 'openai' ou 'local'."
+        )
+
+    local_model_name = getenv("LOCAL_WHISPER_MODEL", OpenAISettings.local_model_name)
+    local_device = getenv("LOCAL_WHISPER_DEVICE", OpenAISettings.local_device)
+    local_compute_type = getenv("LOCAL_WHISPER_COMPUTE", OpenAISettings.local_compute_type)
+    local_download_root = getenv("LOCAL_WHISPER_CACHE", None)
+
+    # Força CPU se backend local e qualquer indício de auto ou GPU problemática
+    if transcription_backend == "local":
+        if local_device.lower() in {"auto", "cuda"}:
+            local_device = "cpu"
+            local_compute_type = "float32"
+        # Verificação adicional: se não há CUDA_VISIBLE_DEVICES, força CPU
+        if getenv("CUDA_VISIBLE_DEVICES") is None:
+            local_device = "cpu"
+            local_compute_type = "float32"
+
+    return OpenAISettings(
+        api_key=api_key,
+        model_transcription=model_transcription,
+        model_summary=model_summary,
+        transcription_backend=transcription_backend,
+        local_model_name=local_model_name,
+        local_device=local_device,
+        local_compute_type=local_compute_type,
+        local_download_root=local_download_root,
+    )
+
+
+def get_ffmpeg_path() -> Path:
+    """Resolve the ffmpeg executable path.
+
+    Priority order:
+    1. `FFMPEG_BIN` environment variable (absolute path).
+    2. System PATH lookup via `which`.
+    """
+
+    load_environment()
+    from os import getenv
+
+    env_path = getenv("FFMPEG_BIN")
+    if env_path:
+        ffmpeg_path = Path(env_path)
+        if not ffmpeg_path.exists():
+            raise RuntimeError(
+                f"FFMPEG_BIN is set to '{env_path}', but the file does not exist."
+            )
+        return ffmpeg_path
+
+    discovered = which("ffmpeg")
+    if not discovered:
+        raise RuntimeError(
+            "ffmpeg executable not found. Set FFMPEG_BIN in the environment or add ffmpeg to PATH."
+        )
+    return Path(discovered)
+</file>
+
+<file path="ui/main_window.py">
+"""PySide6 main window skeleton for Magic Summary."""
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+from typing import Callable, Optional
+
+import sys
+
+APP_ROOT = Path(__file__).resolve().parents[1]
+if str(APP_ROOT) not in sys.path:
+    sys.path.insert(0, str(APP_ROOT))
+
+from PySide6.QtCore import Qt, Signal, Slot, QUrl
+from PySide6.QtGui import QAction
+from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
+from PySide6.QtMultimediaWidgets import QVideoWidget
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QListWidgetItem,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QProgressBar,
+    QSplitter,
+    QTextEdit,
+    QFrame,
+    QTabWidget,
+    QToolBar,
+    QVBoxLayout,
+    QWidget,
+)
+
+from core.models import (
+    ProcessingStatus,
+    TopicSummary,
+    VideoSummary,
+    TranscriptSegment,
+    SummaryMetadata,
+)
+
+
+class MainWindow(QMainWindow):
+    request_transcription = Signal(Path)
+
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Video Feedback Summarizer")
+        self.resize(1200, 720)
+        self.statusBar()
+        self._create_actions()
+        self._create_toolbar()
+        self._create_content()
+        self._is_busy = False
+        self._current_file: Optional[Path] = None
+        self._segments: list[TranscriptSegment] | None = None
+
+    def _create_actions(self) -> None:
+        self.action_import = QAction("Importar vídeo", self)
+        self.action_import.triggered.connect(self.open_file_dialog)
+
+        self.action_quit = QAction("Sair", self)
+        self.action_quit.triggered.connect(QApplication.quit)
+
+    def _create_toolbar(self) -> None:
+        toolbar = QToolBar("Main")
+        toolbar.setMovable(False)
+        toolbar.addAction(self.action_import)
+        toolbar.addSeparator()
+        toolbar.addAction(self.action_quit)
+        self.addToolBar(toolbar)
+
+    def _create_content(self) -> None:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+
+        self.label_status = QLabel("Arraste um vídeo ou importe para começar")
+        self.label_status.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.label_status)
+
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setVisible(False)
+        layout.addWidget(self.progress)
+
+        self.button_import = QPushButton("Importar vídeo")
+        self.button_import.clicked.connect(self.open_file_dialog)
+        layout.addWidget(self.button_import, alignment=Qt.AlignCenter)
+
+        self.info_label = QLabel()
+        self.info_label.setAlignment(Qt.AlignCenter)
+        self.info_label.setVisible(False)
+        layout.addWidget(self.info_label)
+
+        self.backend_frame = QFrame()
+        backend_layout = QHBoxLayout(self.backend_frame)
+        backend_layout.setContentsMargins(0, 0, 0, 0)
+        backend_layout.setSpacing(12)
+
+        self.backend_label = QLabel()
+        self.backend_label.setAlignment(Qt.AlignCenter)
+        backend_layout.addWidget(self.backend_label, alignment=Qt.AlignCenter)
+
+        self.backend_frame.setVisible(False)
+        layout.addWidget(self.backend_frame)
+
+        self.splitter = QSplitter(Qt.Horizontal)
+        layout.addWidget(self.splitter, stretch=1)
+
+        # Player placeholder (left column)
+        self.player_placeholder = QTextEdit()
+        self.player_placeholder.setReadOnly(True)
+        self.player_placeholder.setText("[PLAYER DE VÍDEO]\n(placeholder)")
+        self.splitter.addWidget(self.player_placeholder)
+
+        # Topics list (middle column)
+        self.topic_list = QListWidget()
+        self.topic_list.itemClicked.connect(self._on_topic_clicked)
+        self.splitter.addWidget(self.topic_list)
+
+        # Summary & transcript (right column)
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+
+        self.summary_box = QTextEdit()
+        self.summary_box.setReadOnly(True)
+        right_layout.addWidget(self.summary_box)
+
+        self.tabs = QTabWidget()
+        right_layout.addWidget(self.tabs)
+
+        self.highlights_box = QTextEdit()
+        self.highlights_box.setReadOnly(True)
+        self.tabs.addTab(self.highlights_box, "Highlights")
+
+        self.raw_transcript_box = QTextEdit()
+        self.raw_transcript_box.setReadOnly(True)
+        self.tabs.addTab(self.raw_transcript_box, "Transcrição")
+
+        self.splitter.addWidget(right_panel)
+        self.setCentralWidget(container)
+
+    # Public API -------------------------------------------------
+    @Slot(Path)
+    def open_file_dialog(self) -> None:
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Selecione um vídeo",
+            "",
+            "Vídeos (*.mp4 *.mkv *.mov)",
+        )
+        if file_path:
+            self.request_transcription.emit(Path(file_path))
+
+    def set_processing(self, status: ProcessingStatus) -> None:
+        self.progress.setVisible(True)
+        self.progress.setValue(int(status.progress * 100))
+        self.label_status.setText(status.message or status.status)
+
+    def set_ready(self) -> None:
+        self.progress.setVisible(False)
+        self.label_status.setText("Processamento concluído")
+
+    def set_busy(self, busy: bool) -> None:
+        self._is_busy = busy
+        self.button_import.setEnabled(not busy)
+        self.action_import.setEnabled(not busy)
+
+    def reset_results(self) -> None:
+        self.topic_list.clear()
+        self.summary_box.clear()
+        self.highlights_box.clear()
+        self.raw_transcript_box.clear()
+        self.player_placeholder.setPlainText("[PLAYER DE VÍDEO]\n(placeholder)")
+        self.info_label.clear()
+        self.info_label.setVisible(False)
+        self._segments = None
+        self.backend_label.clear()
+        self.backend_frame.setVisible(False)
+
+    def show_error(self, message: str) -> None:
+        QMessageBox.critical(self, "Erro", message)
+        self.progress.setVisible(False)
+        self.label_status.setText("Não foi possível processar o vídeo")
+        self.statusBar().clearMessage()
+
+    def display_summary(self, summary: VideoSummary) -> None:
+        self.topic_list.clear()
+        self.summary_box.clear()
+        self.highlights_box.clear()
+
+        if not summary.topics:
+            self.summary_box.setPlainText("Nenhum tópico identificado")
+            return
+
+        for topic in summary.topics:
+            item = QListWidgetItem(f"{topic.title} ({topic.timestamp})")
+            item.setData(Qt.UserRole, topic)
+            self.topic_list.addItem(item)
+
+        self.summary_box.setPlainText(
+            "\n\n".join(f"# {topic.title}\n{topic.description}" for topic in summary.topics)
+        )
+
+        self._populate_transcript(summary)
+        self.tabs.setCurrentWidget(self.highlights_box)
+
+    def _on_topic_clicked(self, item: QListWidgetItem) -> None:
+        topic: TopicSummary = item.data(Qt.UserRole)
+        # TODO: Integrate with VLC player seek
+        self.statusBar().showMessage(f"Jump to {topic.timestamp}")
+
+    def set_file_info(self, file_path: Path, duration: float | None = None) -> None:
+        self._current_file = file_path
+        parts = [file_path.name]
+        if duration is not None:
+            minutes, seconds = divmod(int(duration), 60)
+            parts.append(f"duração {minutes:02d}:{seconds:02d}")
+        self.info_label.setText(" • ".join(parts))
+        self.info_label.setVisible(True)
+
+    def _populate_transcript(self, summary: VideoSummary) -> None:
+        highlights_text = []
+        for topic in summary.topics:
+            for highlight in topic.highlights:
+                highlights_text.append(
+                    f"[{highlight.timestamp}] {highlight.title}: \"{highlight.quote}\""
+                )
+        if highlights_text:
+            self.highlights_box.setPlainText("\n".join(highlights_text))
+        else:
+            self.highlights_box.clear()
+
+    def set_raw_transcript(self, text: str) -> None:
+        self.raw_transcript_box.setPlainText(text)
+
+    def cache_segments(self, segments: list[TranscriptSegment]) -> None:
+        self._segments = segments
+
+    def set_backend_info(self, info: dict) -> None:
+        backend = info.get("backend", "?")
+        if backend == "openai":
+            model = info.get("model") or "-"
+            self.backend_label.setText(f"Backend: OpenAI • Modelo: {model}")
+        else:
+            engine = info.get("engine", "local")
+            model = info.get("model") or "-"
+            device = info.get("device") or "?"
+            compute = info.get("compute") or "?"
+            self.backend_label.setText(
+                f"Backend: {engine} ({backend}) • Modelo: {model} • Dispositivo: {device} • Precisão: {compute}"
+            )
+        self.backend_frame.setVisible(True)
+
+
+if __name__ == "__main__":
+    import sys
+
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
+</file>
+
+<file path="core/transcription.py">
+"""Transcription service using OpenAI Whisper API."""
+from __future__ import annotations
+
+from pathlib import Path
+from tempfile import NamedTemporaryFile
+from typing import BinaryIO, Callable, Tuple
+
+import subprocess
+
+from openai import OpenAI
+
+from .config import get_openai_settings, get_ffmpeg_path
+from .models import TranscriptSegment, ProcessingStatus
+
+StatusCallback = Callable[[ProcessingStatus], None]
+
+
+class TranscriptionService:
+    def __init__(self, client: OpenAI | None = None):
+        settings = get_openai_settings()
+        self._settings = settings
+        self._backend = settings.transcription_backend
+
+        self._openai_client: OpenAI | None = None
+        self._openai_model: str | None = None
+        self._local_model = None
+        self._active_local_device: str | None = None
+        self._active_local_compute: str | None = None
+
+        if self._backend == "openai":
+            self._openai_client = client or OpenAI(api_key=settings.api_key)
+            self._openai_model = settings.model_transcription
+        elif self._backend == "local":
+            try:
+                from faster_whisper import WhisperModel  # type: ignore import
+            except ImportError as exc:  # pragma: no cover - import error path
+                raise RuntimeError(
+                    "faster-whisper não está instalado. Execute 'uv pip install faster-whisper'."
+                ) from exc
+
+            download_kwargs = {}
+            if settings.local_download_root:
+                download_kwargs["download_root"] = settings.local_download_root
+
+            # Inicialização com fallback robusto para CPU
+            model, device_used, compute_used = self._load_local_model(
+                settings.local_model_name,
+                download_kwargs,
+            )
+            self._local_model = model
+            self._active_local_device = device_used
+            self._active_local_compute = compute_used
+        else:
+            raise ValueError(f"Transcription backend '{self._backend}' não é suportado")
+
+    def _load_local_model(self, model_name: str, download_kwargs: dict) -> tuple[object, str, str]:
+        """Carrega o modelo Whisper com fallback para CPU em caso de erro de GPU."""
+        from faster_whisper import WhisperModel  # type: ignore import
+
+        device = self._settings.local_device
+        compute_type = self._settings.local_compute_type
+
+        try:
+            model = WhisperModel(
+                model_name,
+                device=device,
+                compute_type=compute_type,
+                **download_kwargs,
+            )
+            return model, device, compute_type
+        except Exception as exc:
+            error_str = str(exc).lower()
+            if any(keyword in error_str for keyword in ["cudnn", "cuda", "invalid handle", "locate"]):
+                print("Aviso: Erro de GPU (cuDNN/CUDA) detectado durante carregamento. Fazendo fallback para CPU.")
+                fallback_device = "cpu"
+                fallback_compute = "float32"
+                model = WhisperModel(
+                    model_name,
+                    device=fallback_device,
+                    compute_type=fallback_compute,
+                    **download_kwargs,
+                )
+                return model, fallback_device, fallback_compute
+            else:
+                raise RuntimeError(f"Erro ao carregar modelo local: {exc}") from exc
+
+    def transcribe(self, video_path: Path, status_cb: StatusCallback | None = None) -> list[TranscriptSegment]:
+        if not video_path.exists():
+            raise FileNotFoundError(f"Vídeo não encontrado: {video_path}")
+
+        if status_cb:
+            status_cb(ProcessingStatus(status="transcribing", progress=0.05, message="Extraindo áudio"))
+
+        audio_input, temp_path = self._prepare_audio(video_path)
+
+        try:
+            if self._backend == "openai":
+                segments = self._transcribe_openai(audio_input, status_cb)
+            else:
+                # Para processamento local, fechamos o handle antes de reutilizar o arquivo.
+                audio_input.close()
+                segments = self._transcribe_local(temp_path, status_cb)
+        finally:
+            if not audio_input.closed:
+                audio_input.close()
+            temp_path.unlink(missing_ok=True)
+
+        if status_cb:
+            status_cb(ProcessingStatus(status="transcribing", progress=1.0, message="Transcrição concluída"))
+
+        return segments
+
+    def _prepare_audio(self, video_path: Path) -> Tuple[BinaryIO, Path]:
+        """Extract the audio track as a temporary WAV file and return an open handle and its path."""
+
+        ffmpeg_bin = get_ffmpeg_path()
+        temp_file = NamedTemporaryFile(suffix=".wav", delete=False)
+        temp_path = Path(temp_file.name)
+        temp_file.close()
+
+        # Extract audio track as WAV (16-bit PCM) which Whisper accepts.
+        cmd = [
+            str(ffmpeg_bin),
+            "-y",
+            "-i",
+            str(video_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "wav",
+            str(temp_path),
+        ]
+
+        try:
+            subprocess.run(cmd, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        except subprocess.CalledProcessError as exc:
+            temp_path.unlink(missing_ok=True)
+            raise RuntimeError("Falha ao extrair áudio com ffmpeg") from exc
+
+        audio_handle = temp_path.open("rb")
+        return audio_handle, temp_path
+
+    # Backends -------------------------------------------------
+    def _transcribe_openai(
+        self,
+        audio_input: BinaryIO,
+        status_cb: StatusCallback | None = None,
+    ) -> list[TranscriptSegment]:
+        if status_cb:
+            status_cb(ProcessingStatus(status="transcribing", progress=0.3, message="Enviando áudio para Whisper"))
+
+        assert self._openai_client is not None
+        assert self._openai_model is not None
+
+        response = self._openai_client.audio.transcriptions.create(
+            model=self._openai_model,
+            file=audio_input,
+            response_format="verbose_json",
+            temperature=0.0,
+        )
+
+        segments = [
+            TranscriptSegment(start=seg.start, end=seg.end, text=seg.text)
+            for seg in response.segments
+        ]
+        return segments
+
+    def _transcribe_local(
+        self,
+        audio_path: Path,
+        status_cb: StatusCallback | None = None,
+    ) -> list[TranscriptSegment]:
+        if status_cb:
+            status_cb(ProcessingStatus(status="transcribing", progress=0.3, message="Transcrevendo localmente"))
+
+        assert self._local_model is not None
+
+        try:
+            segments_iter, info = self._local_model.transcribe(
+                str(audio_path),
+                beam_size=5,
+                temperature=0.0,
+            )
+
+            duration = getattr(info, "duration", None) or 0.0
+            results: list[TranscriptSegment] = []
+
+            for segment in segments_iter:
+                results.append(
+                    TranscriptSegment(start=segment.start, end=segment.end, text=segment.text)
+                )
+                if status_cb and duration > 0:
+                    progress = 0.3 + min(segment.end / duration, 1.0) * 0.6
+                    status_cb(
+                        ProcessingStatus(
+                            status="transcribing",
+                            progress=progress,
+                            message="Transcrevendo localmente",
+                        )
+                    )
+
+            if status_cb and not results:
+                status_cb(
+                    ProcessingStatus(
+                        status="transcribing",
+                        progress=0.9,
+                        message="Transcrição local finalizando",
+                    )
+                )
+
+            return results
+        except Exception as exc:
+            error_str = str(exc).lower()
+            if any(keyword in error_str for keyword in ["cudnn", "cuda", "invalid handle", "locate"]):
+                error_msg = "Erro de GPU (cuDNN/CUDA) durante transcrição. Reinicializando em CPU."
+                if status_cb:
+                    status_cb(ProcessingStatus(status="warning", progress=0.3, message=error_msg))
+                # Re-inicializa o modelo em CPU e tenta novamente
+                download_kwargs = {"download_root": self._settings.local_download_root} if self._settings.local_download_root else {}
+                model, device_used, compute_used = self._load_local_model(
+                    self._settings.local_model_name,
+                    download_kwargs,
+                )
+                self._local_model = model
+                self._active_local_device = device_used
+                self._active_local_compute = compute_used
+                # Chama recursivamente com o novo modelo
+                return self._transcribe_local(audio_path, status_cb)
+            else:
+                error_msg = f"Erro na transcrição local: {exc}"
+                if status_cb:
+                    status_cb(ProcessingStatus(status="error", progress=0.0, message=error_msg))
+                raise RuntimeError(error_msg) from exc
+
+    def get_backend_metadata(self) -> dict[str, str | None]:
+        if self._backend == "openai":
+            return {
+                "backend": "openai",
+                "model": self._openai_model,
+            }
+
+        return {
+            "backend": "local",
+            "engine": "faster-whisper",
+            "model": self._settings.local_model_name,
+            "device": self._active_local_device or self._settings.local_device,
+            "compute": self._active_local_compute or self._settings.local_compute_type,
+        }
+</file>
+
+</files>

@@ -41,6 +41,13 @@ class VideoSummary(BaseModel):
         return len(self.topics)
 
 
+class SummaryMetadata(BaseModel):
+    prompt_version: str | None = None
+    regenerated_at: str | None = None
+    backend_model: str | None = None
+    extra: dict = Field(default_factory=dict)
+
+
 class ProcessingStatus(BaseModel):
     status: str
     progress: float = Field(0.0, ge=0.0, le=1.0)

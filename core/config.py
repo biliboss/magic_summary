@@ -22,14 +22,14 @@ def load_environment(dotenv_path: Optional[Path] = None) -> None:
 @dataclass
 class OpenAISettings:
     api_key: str | None = None
-    model_transcription: str = "gpt-4o-mini-transcribe"
-    model_summary: str = "gpt-4.1-mini"
-    transcription_backend: str = "openai"
+    transcription_backend: str = "local"
+    model_transcription: str = "whisper-1"
+    model_summary: str = "gpt-4o-mini"
+    summary_temperature: float | None = None
     local_model_name: str = "base"
     local_device: str = "cpu"  # Forçado para CPU para evitar erros de CUDA no Windows
     local_compute_type: str = "float32"  # Forçado para float32, compatível sem CUDA
     local_download_root: str | None = None
-
 
 def get_openai_settings() -> OpenAISettings:
     load_environment()
@@ -38,6 +38,7 @@ def get_openai_settings() -> OpenAISettings:
     api_key = getenv("OPENAI_API_KEY")
     model_transcription = getenv("OPENAI_WHISPER_MODEL", OpenAISettings.model_transcription)
     model_summary = getenv("OPENAI_SUMMARY_MODEL", OpenAISettings.model_summary)
+    summary_temperature_env = getenv("OPENAI_SUMMARY_TEMPERATURE")
 
     backend_env = getenv("TRANSCRIPTION_BACKEND")
     transcription_backend = (
@@ -68,11 +69,21 @@ def get_openai_settings() -> OpenAISettings:
             local_device = "cpu"
             local_compute_type = "float32"
 
+    summary_temperature = None
+    if summary_temperature_env:
+        try:
+            summary_temperature = float(summary_temperature_env)
+        except ValueError as exc:
+            raise RuntimeError(
+                "OPENAI_SUMMARY_TEMPERATURE deve ser um número (float)."
+            ) from exc
+
     return OpenAISettings(
         api_key=api_key,
         model_transcription=model_transcription,
         model_summary=model_summary,
         transcription_backend=transcription_backend,
+        summary_temperature=summary_temperature,
         local_model_name=local_model_name,
         local_device=local_device,
         local_compute_type=local_compute_type,
