@@ -78,7 +78,7 @@ class SummarizationService:
                 {"role": "user", "content": user_prompt},
             ],
             # Request a larger token budget to allow the model to generate richer, more detailed summaries.
-            "max_tokens": 2500,
+            "max_completion_tokens": 8000,
         }
         if self._temperature is not None:
             create_kwargs["temperature"] = self._temperature

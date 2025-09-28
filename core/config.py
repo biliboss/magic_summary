@@ -24,7 +24,7 @@ class OpenAISettings:
     api_key: str | None = None
     transcription_backend: str = "local"
     model_transcription: str = "whisper-1"
-    model_summary: str = "gpt-4o-mini"
+    model_summary: str = "gpt-4o-mini-2024-07-18"  # 128k context window
     summary_temperature: float | None = None
     local_model_name: str = "base"
     local_device: str = "cpu"  # Forçado para CPU para evitar erros de CUDA no Windows
