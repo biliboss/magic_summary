@@ -60,6 +60,7 @@ class MainWindow(QMainWindow):
         self._is_busy = False
         self._current_file: Optional[Path] = None
         self._segments: list[TranscriptSegment] | None = None
+        self._current_summary: VideoSummary | None = None
         self._has_summary = False
         self._was_playing = False
         self._media_player = QMediaPlayer(self)
@@ -157,11 +158,14 @@ class MainWindow(QMainWindow):
         # Topics list (middle column)
         self.topic_list = QListWidget()
         self.topic_list.itemClicked.connect(self._on_topic_clicked)
+        self.topic_list.setMinimumWidth(220)
+        self.topic_list.setMaximumWidth(360)
         self.splitter.addWidget(self.topic_list)
 
         # Summary & transcript (right column)
         right_panel = QWidget()
         right_layout = QVBoxLayout(right_panel)
+        right_panel.setMinimumWidth(360)
 
         self.summary_box = QTextEdit()
         self.summary_box.setReadOnly(True)
@@ -184,6 +188,12 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.summary_meta_label)
 
         self.splitter.addWidget(right_panel)
+        self.splitter.setStretchFactor(0, 5)
+        self.splitter.setStretchFactor(1, 2)
+        self.splitter.setStretchFactor(2, 3)
+        self.splitter.setCollapsible(0, False)
+        self.splitter.setCollapsible(1, False)
+        self.splitter.setCollapsible(2, False)
         self.setCentralWidget(container)
 
     # Public API -------------------------------------------------
@@ -243,6 +253,7 @@ class MainWindow(QMainWindow):
         self._update_regenerate_state()
         self.button_play.setEnabled(False)
         self.position_slider.setEnabled(False)
+        self._current_summary = None
 
     def show_error(self, message: str) -> None:
         QMessageBox.critical(self, "Erro", message)
@@ -254,6 +265,7 @@ class MainWindow(QMainWindow):
         self.topic_list.clear()
         self.summary_box.clear()
         self.highlights_list.clear()
+        self._current_summary = summary
 
         if not summary.topics:
             self.summary_box.setPlainText("Nenhum tópico identificado")
@@ -266,19 +278,23 @@ class MainWindow(QMainWindow):
             item.setData(Qt.UserRole, topic)
             self.topic_list.addItem(item)
 
-        self.summary_box.setPlainText(
-            "\n\n".join(f"# {topic.title}\n{topic.description}" for topic in summary.topics)
-        )
-
         self._populate_transcript(summary)
         self.tabs.setCurrentWidget(self.highlights_list)
         self._has_summary = True
         self._update_regenerate_state()
 
+        self.topic_list.setCurrentRow(0)
+        first_topic_item = self.topic_list.item(0)
+        if first_topic_item:
+            self._show_topic_details(first_topic_item.data(Qt.UserRole))
+        else:
+            self.summary_box.setPlainText("Selecione um tópico para ver os detalhes")
+
     def _on_topic_clicked(self, item: QListWidgetItem) -> None:
         topic: TopicSummary = item.data(Qt.UserRole)
         self._seek_to_timestamp(topic.timestamp)
         self.statusBar().showMessage(f"Pulando para {topic.timestamp}")
+        self._show_topic_details(topic)
 
     def set_file_info(self, file_path: Path, duration: float | None = None) -> None:
         self._current_file = file_path
@@ -297,19 +313,13 @@ class MainWindow(QMainWindow):
 
     def _populate_transcript(self, summary: VideoSummary) -> None:
         self.highlights_list.clear()
-        highlights_text = []
         for topic in summary.topics:
             for highlight in topic.highlights:
-                highlights_text.append(
-                    f"[{highlight.timestamp}] {highlight.title}: \"{highlight.quote}\""
-                )
                 item = QListWidgetItem(
                     f"[{highlight.timestamp}] {highlight.title}\n{highlight.quote}"
                 )
                 item.setData(Qt.UserRole, highlight)
                 self.highlights_list.addItem(item)
-        if highlights_text:
-            self.summary_box.moveCursor(QTextCursor.Start)
 
     def set_raw_transcript(self, text: str) -> None:
         self.raw_transcript_box.setPlainText(text)
@@ -374,6 +384,48 @@ class MainWindow(QMainWindow):
         else:
             self._media_player.play()
 
+    def _topic_row(self, topic: TopicSummary) -> int | None:
+        for index in range(self.topic_list.count()):
+            item = self.topic_list.item(index)
+            stored = item.data(Qt.UserRole)
+            if stored is topic:
+                return index
+        return None
+
+    def _show_topic_details(
+        self,
+        topic: TopicSummary,
+        selected_highlight: TopicHighlight | None = None,
+    ) -> None:
+        lines: list[str] = []
+        lines.append(f"{topic.title} ({topic.timestamp})")
+        if topic.description:
+            lines.extend(["", topic.description.strip()])
+
+        if topic.highlights:
+            lines.append("")
+            lines.append("Highlights:")
+            for highlight in topic.highlights:
+                prefix = "→" if highlight is selected_highlight else "-"
+                quote = highlight.quote.strip()
+                lines.append(
+                    f"{prefix} [{highlight.timestamp}] {highlight.title}: \"{quote}\""
+                )
+        self.summary_box.setPlainText("\n".join(lines))
+
+    def _find_topic_for_highlight(self, highlight: TopicHighlight) -> TopicSummary | None:
+        if not self._current_summary:
+            return None
+        for topic in self._current_summary.topics:
+            for candidate in topic.highlights:
+                if (
+                    candidate.timestamp == highlight.timestamp
+                    and candidate.title == highlight.title
+                    and candidate.quote == highlight.quote
+                ):
+                    return topic
+        return None
+
     def _on_position_changed(self, position: int) -> None:
         if not self.position_slider.isSliderDown():
             self.position_slider.setValue(position)
@@ -408,6 +460,14 @@ class MainWindow(QMainWindow):
             return
         self._seek_to_timestamp(highlight.timestamp)
         self.statusBar().showMessage(f"Pulando para {highlight.timestamp}")
+        topic = self._find_topic_for_highlight(highlight)
+        if topic:
+            row = self._topic_row(topic)
+            if row is not None:
+                self.topic_list.blockSignals(True)
+                self.topic_list.setCurrentRow(row)
+                self.topic_list.blockSignals(False)
+            self._show_topic_details(topic, highlight)
 
     def _seek_to_timestamp(self, timestamp: str) -> None:
         try:
