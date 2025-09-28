@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMainWindow,
@@ -31,7 +32,12 @@ from PySide6.QtWidgets import (
     QFrame,
     QTabWidget,
     QToolBar,
+    QToolButton,
     QSlider,
+    QComboBox,
+    QStyle,
+    QSpacerItem,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -63,6 +69,9 @@ class MainWindow(QMainWindow):
         self._current_summary: VideoSummary | None = None
         self._has_summary = False
         self._was_playing = False
+        self._duration_ms = 0
+        self._last_volume = 70
+        self._topic_filter: str = ""
         self._media_player = QMediaPlayer(self)
         self._audio_output = QAudioOutput(self)
         self._media_player.setAudioOutput(self._audio_output)
@@ -133,16 +142,30 @@ class MainWindow(QMainWindow):
         player_layout = QVBoxLayout(player_panel)
         player_layout.setContentsMargins(0, 0, 0, 0)
         player_layout.setSpacing(6)
-
         self.video_widget = QVideoWidget()
         player_layout.addWidget(self.video_widget)
         self._media_player.setVideoOutput(self.video_widget)
 
         controls_layout = QHBoxLayout()
-        self.button_play = QPushButton("Reproduzir")
+        controls_layout.setSpacing(10)
+
+        self.button_back = QToolButton()
+        self.button_back.setIcon(self.style().standardIcon(QStyle.SP_MediaSeekBackward))
+        self.button_back.clicked.connect(lambda: self._skip_seconds(-10))
+        self.button_back.setEnabled(False)
+        controls_layout.addWidget(self.button_back)
+
+        self.button_play = QToolButton()
+        self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.button_play.clicked.connect(self.toggle_playback)
         self.button_play.setEnabled(False)
         controls_layout.addWidget(self.button_play)
+
+        self.button_forward = QToolButton()
+        self.button_forward.setIcon(self.style().standardIcon(QStyle.SP_MediaSeekForward))
+        self.button_forward.clicked.connect(lambda: self._skip_seconds(10))
+        self.button_forward.setEnabled(False)
+        controls_layout.addWidget(self.button_forward)
 
         self.position_slider = QSlider(Qt.Horizontal)
         self.position_slider.setRange(0, 0)
@@ -152,15 +175,63 @@ class MainWindow(QMainWindow):
         self.position_slider.setEnabled(False)
         controls_layout.addWidget(self.position_slider, stretch=1)
 
+        self.time_label = QLabel("00:00 / 00:00")
+        self.time_label.setMinimumWidth(120)
+        controls_layout.addWidget(self.time_label)
+
+        volume_container = QWidget()
+        volume_layout = QHBoxLayout(volume_container)
+        volume_layout.setContentsMargins(0, 0, 0, 0)
+        volume_layout.setSpacing(6)
+
+        self.button_mute = QToolButton()
+        self.button_mute.setIcon(self.style().standardIcon(QStyle.SP_MediaVolume))
+        self.button_mute.clicked.connect(self._toggle_mute)
+        self.button_mute.setEnabled(False)
+        volume_layout.addWidget(self.button_mute)
+
+        self.volume_slider = QSlider(Qt.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(self._last_volume)
+        self.volume_slider.valueChanged.connect(self._on_volume_changed)
+        self.volume_slider.setEnabled(False)
+        volume_layout.addWidget(self.volume_slider)
+
+        controls_layout.addWidget(volume_container)
+
+        controls_layout.addSpacerItem(QSpacerItem(12, 1, QSizePolicy.Fixed, QSizePolicy.Minimum))
+
+        self.speed_combo = QComboBox()
+        self.speed_combo.addItems(["0.5x", "1x", "1.25x", "1.5x", "2x"])
+        self.speed_combo.setCurrentIndex(1)
+        self.speed_combo.currentIndexChanged.connect(self._on_speed_changed)
+        self.speed_combo.setEnabled(False)
+        controls_layout.addWidget(QLabel("Velocidade:"))
+        controls_layout.addWidget(self.speed_combo)
+
         player_layout.addLayout(controls_layout)
+
         self.splitter.addWidget(player_panel)
 
         # Topics list (middle column)
+        topics_panel = QWidget()
+        topics_layout = QVBoxLayout(topics_panel)
+        topics_layout.setContentsMargins(0, 0, 0, 0)
+        topics_layout.setSpacing(8)
+
+        self.topic_search = QLineEdit()
+        self.topic_search.setPlaceholderText("Buscar tópicos ou palavras-chave...")
+        self.topic_search.textChanged.connect(self._on_topic_filter_changed)
+        topics_layout.addWidget(self.topic_search)
+
         self.topic_list = QListWidget()
+        self.topic_list.setAlternatingRowColors(True)
         self.topic_list.itemClicked.connect(self._on_topic_clicked)
-        self.topic_list.setMinimumWidth(220)
-        self.topic_list.setMaximumWidth(360)
-        self.splitter.addWidget(self.topic_list)
+        topics_layout.addWidget(self.topic_list)
+
+        topics_panel.setMinimumWidth(220)
+        topics_panel.setMaximumWidth(360)
+        self.splitter.addWidget(topics_panel)
 
         # Summary & transcript (right column)
         right_panel = QWidget()
@@ -245,15 +316,28 @@ class MainWindow(QMainWindow):
         self.summary_meta_label.setVisible(False)
         self.position_slider.setValue(0)
         self.position_slider.setRange(0, 0)
-        self.button_play.setText("Reproduzir")
         self._has_summary = False
         self._was_playing = False
         self._media_player.stop()
         self._media_player.setSource(QUrl())
         self._update_regenerate_state()
         self.button_play.setEnabled(False)
+        self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         self.position_slider.setEnabled(False)
         self._current_summary = None
+        self.button_back.setEnabled(False)
+        self.button_forward.setEnabled(False)
+        self.button_mute.setEnabled(False)
+        self.volume_slider.setEnabled(False)
+        self.speed_combo.setEnabled(False)
+        self.time_label.setText("00:00 / 00:00")
+        self._duration_ms = 0
+        self._topic_filter = ""
+        if hasattr(self, "topic_search"):
+            self.topic_search.blockSignals(True)
+            self.topic_search.clear()
+            self.topic_search.blockSignals(False)
+            self.topic_search.setEnabled(False)
 
     def show_error(self, message: str) -> None:
         QMessageBox.critical(self, "Erro", message)
@@ -273,22 +357,20 @@ class MainWindow(QMainWindow):
             self._update_regenerate_state()
             return
 
-        for topic in summary.topics:
-            item = QListWidgetItem(f"{topic.title} ({topic.timestamp})")
-            item.setData(Qt.UserRole, topic)
-            self.topic_list.addItem(item)
+        self.topic_search.blockSignals(True)
+        self.topic_search.clear()
+        self.topic_search.setEnabled(True)
+        self.topic_search.blockSignals(False)
+        self._topic_filter = ""
+
+        self._refresh_topic_list()
 
         self._populate_transcript(summary)
         self.tabs.setCurrentWidget(self.highlights_list)
         self._has_summary = True
         self._update_regenerate_state()
 
-        self.topic_list.setCurrentRow(0)
-        first_topic_item = self.topic_list.item(0)
-        if first_topic_item:
-            self._show_topic_details(first_topic_item.data(Qt.UserRole))
-        else:
-            self.summary_box.setPlainText("Selecione um tópico para ver os detalhes")
+        self._select_first_topic()
 
     def _on_topic_clicked(self, item: QListWidgetItem) -> None:
         topic: TopicSummary = item.data(Qt.UserRole)
@@ -310,6 +392,14 @@ class MainWindow(QMainWindow):
         self.position_slider.setEnabled(False)
         self.button_play.setEnabled(True)
         self._was_playing = False
+        self.button_back.setEnabled(True)
+        self.button_forward.setEnabled(True)
+        self.button_mute.setEnabled(True)
+        self.volume_slider.setEnabled(True)
+        self.speed_combo.setEnabled(True)
+        self._audio_output.setVolume(self._last_volume / 100)
+        self.time_label.setText("00:00 / 00:00")
+        self._duration_ms = 0
 
     def _populate_transcript(self, summary: VideoSummary) -> None:
         self.highlights_list.clear()
@@ -381,8 +471,10 @@ class MainWindow(QMainWindow):
             self._media_player.setSource(QUrl.fromLocalFile(str(self._current_file)))
         if self._media_player.playbackState() == QMediaPlayer.PlayingState:
             self._media_player.pause()
+            self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
         else:
             self._media_player.play()
+            self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
 
     def _topic_row(self, topic: TopicSummary) -> int | None:
         for index in range(self.topic_list.count()):
@@ -392,13 +484,62 @@ class MainWindow(QMainWindow):
                 return index
         return None
 
+    def _refresh_topic_list(self) -> None:
+        self.topic_list.blockSignals(True)
+        self.topic_list.clear()
+        if not self._current_summary:
+            self.topic_list.blockSignals(False)
+            return
+
+        filter_text = self._topic_filter.strip().lower()
+
+        def matches(topic: TopicSummary) -> bool:
+            if not filter_text:
+                return True
+            candidates = [
+                topic.title,
+                topic.description or "",
+            ]
+            for highlight in topic.highlights:
+                candidates.append(highlight.title)
+                candidates.append(highlight.quote)
+            return any(filter_text in value.lower() for value in candidates if value)
+
+        for topic in self._current_summary.topics:
+            if not matches(topic):
+                continue
+            item = QListWidgetItem(f"[{topic.timestamp}] {topic.title}")
+            item.setData(Qt.UserRole, topic)
+            self.topic_list.addItem(item)
+        self.topic_list.blockSignals(False)
+
+    def _select_first_topic(self) -> None:
+        if self.topic_list.count() == 0:
+            if self._topic_filter.strip():
+                self.summary_box.setPlainText("Nenhum tópico corresponde ao filtro aplicado.")
+            else:
+                self.summary_box.setPlainText("Nenhum tópico identificado")
+            return
+        self.topic_list.setCurrentRow(0)
+        first_item = self.topic_list.item(0)
+        if first_item:
+            self._show_topic_details(first_item.data(Qt.UserRole))
+
+    def _on_topic_filter_changed(self, text: str) -> None:
+        self._topic_filter = text
+        self._refresh_topic_list()
+        self._select_first_topic()
+
     def _show_topic_details(
         self,
         topic: TopicSummary,
         selected_highlight: TopicHighlight | None = None,
     ) -> None:
-        lines: list[str] = []
-        lines.append(f"{topic.title} ({topic.timestamp})")
+        if topic is None:
+            self.summary_box.clear()
+            return
+
+        lines: list[str] = [f"{topic.title} ({topic.timestamp})"]
         if topic.description:
             lines.extend(["", topic.description.strip()])
 
@@ -429,21 +570,36 @@ class MainWindow(QMainWindow):
     def _on_position_changed(self, position: int) -> None:
         if not self.position_slider.isSliderDown():
             self.position_slider.setValue(position)
+        self.time_label.setText(
+            f"{self._format_time(position)} / {self._format_time(self._duration_ms)}"
+        )
 
     def _on_duration_changed(self, duration: int) -> None:
+        self._duration_ms = max(0, duration)
         if duration <= 0:
+            self.position_slider.setRange(0, 0)
+            self.position_slider.setEnabled(False)
+            self.time_label.setText("00:00 / 00:00")
             return
         self.position_slider.setRange(0, duration)
+        self.position_slider.setEnabled(True)
+        current = self._media_player.position()
+        if not self.position_slider.isSliderDown():
+            self.position_slider.setValue(current)
+        self.time_label.setText(
+            f"{self._format_time(current)} / {self._format_time(duration)}"
+        )
 
     def _on_playback_state_changed(self, state: QMediaPlayer.PlaybackState) -> None:
         if state == QMediaPlayer.PlayingState:
-            self.button_play.setText("Pausar")
+            self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
         else:
-            self.button_play.setText("Reproduzir")
+            self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPlay))
 
     def _on_slider_pressed(self) -> None:
         self._was_playing = self._media_player.playbackState() == QMediaPlayer.PlayingState
-        self._media_player.pause()
+        if self._was_playing:
+            self._media_player.pause()
 
     def _on_slider_released(self) -> None:
         self._media_player.setPosition(self.position_slider.value())
@@ -452,7 +608,58 @@ class MainWindow(QMainWindow):
         self._was_playing = False
 
     def _on_slider_moved(self, position: int) -> None:
+        if self._duration_ms <= 0:
+            return
         self._media_player.setPosition(position)
+
+    def _skip_seconds(self, delta: int) -> None:
+        if self._duration_ms <= 0:
+            return
+        new_position = self._media_player.position() + delta * 1000
+        new_position = max(0, min(new_position, self._duration_ms))
+        self._media_player.setPosition(new_position)
+        if self._media_player.playbackState() != QMediaPlayer.PlayingState:
+            self._media_player.play()
+            self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
+
+    def _toggle_mute(self) -> None:
+        if self._audio_output.volume() > 0.001:
+            self._last_volume = int(self._audio_output.volume() * 100)
+            self._audio_output.setVolume(0.0)
+            self.volume_slider.blockSignals(True)
+            self.volume_slider.setValue(0)
+            self.volume_slider.blockSignals(False)
+            self.button_mute.setIcon(self.style().standardIcon(QStyle.SP_MediaVolumeMuted))
+        else:
+            restored = self._last_volume or 50
+            self._audio_output.setVolume(restored / 100)
+            self.volume_slider.blockSignals(True)
+            self.volume_slider.setValue(restored)
+            self.volume_slider.blockSignals(False)
+            self.button_mute.setIcon(self.style().standardIcon(QStyle.SP_MediaVolume))
+
+    def _on_volume_changed(self, value: int) -> None:
+        self._last_volume = value
+        self._audio_output.setVolume(value / 100)
+        if value == 0:
+            self.button_mute.setIcon(self.style().standardIcon(QStyle.SP_MediaVolumeMuted))
+        else:
+            self.button_mute.setIcon(self.style().standardIcon(QStyle.SP_MediaVolume))
+
+    def _on_speed_changed(self, index: int) -> None:
+        mapping = {0: 0.5, 1: 1.0, 2: 1.25, 3: 1.5, 4: 2.0}
+        rate = mapping.get(index, 1.0)
+        self._media_player.setPlaybackRate(rate)
+
+    def _format_time(self, ms: int) -> str:
+        if ms <= 0:
+            return "00:00"
+        seconds = ms // 1000
+        minutes, seconds = divmod(seconds, 60)
+        hours, minutes = divmod(minutes, 60)
+        if hours:
+            return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+        return f"{minutes:02d}:{seconds:02d}"
 
     def _on_highlight_clicked(self, item: QListWidgetItem) -> None:
         highlight = item.data(Qt.UserRole)
@@ -478,7 +685,7 @@ class MainWindow(QMainWindow):
         self._media_player.setPosition(total_seconds * 1000)
         if self._media_player.playbackState() != QMediaPlayer.PlayingState:
             self._media_player.play()
-        self.button_play.setText("Pausar")
+        self.button_play.setIcon(self.style().standardIcon(QStyle.SP_MediaPause))
 
     def _update_regenerate_state(self) -> None:
         self.action_regenerate.setEnabled(self._has_summary and not self._is_busy)
