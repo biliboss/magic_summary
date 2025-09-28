@@ -10,9 +10,10 @@ import sys
 APP_ROOT = Path(__file__).resolve().parents[1]
 if str(APP_ROOT) not in sys.path:
     sys.path.insert(0, str(APP_ROOT))
+from core.storage import load_recent_videos, save_recent_videos
 
 from PySide6.QtCore import Qt, Signal, Slot, QUrl
-from PySide6.QtGui import QAction, QTextCursor
+from PySide6.QtGui import QAction, QTextCursor, QCursor
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtMultimediaWidgets import QVideoWidget
 from PySide6.QtWidgets import (
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QVBoxLayout,
     QWidget,
+    QMenu,
 )
 
 from core.models import (
@@ -78,7 +80,10 @@ class MainWindow(QMainWindow):
         self._media_player.positionChanged.connect(self._on_position_changed)
         self._media_player.durationChanged.connect(self._on_duration_changed)
         self._media_player.playbackStateChanged.connect(self._on_playback_state_changed)
+        self._recent_videos_limit = 10
+        self._recent_videos: list[Path] = []
         self._create_content()
+        self._load_recent_videos()
 
 
     def _create_actions(self) -> None:
@@ -88,6 +93,10 @@ class MainWindow(QMainWindow):
         self.action_regenerate = QAction("Regerar resumo", self)
         self.action_regenerate.triggered.connect(self._on_regenerate_clicked)
 
+        self.action_recent = QAction("Abrir recentes", self)
+        self.action_recent.triggered.connect(self._show_recent_menu)
+        self.action_recent.setEnabled(False)
+
         self.action_quit = QAction("Sair", self)
         self.action_quit.triggered.connect(QApplication.quit)
 
@@ -96,6 +105,7 @@ class MainWindow(QMainWindow):
         toolbar.setMovable(False)
         toolbar.addAction(self.action_import)
         toolbar.addAction(self.action_regenerate)
+        toolbar.addAction(self.action_recent)
         toolbar.addSeparator()
         toolbar.addAction(self.action_quit)
         self.addToolBar(toolbar)
@@ -116,6 +126,10 @@ class MainWindow(QMainWindow):
         self.button_import = QPushButton("Importar vídeo")
         self.button_import.clicked.connect(self.open_file_dialog)
         layout.addWidget(self.button_import, alignment=Qt.AlignCenter)
+
+        self.recent_label = QLabel("Nenhum vídeo recente.")
+        self.recent_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(self.recent_label)
 
         self.info_label = QLabel()
         self.info_label.setAlignment(Qt.AlignCenter)
@@ -278,6 +292,7 @@ class MainWindow(QMainWindow):
         )
         if file_path:
             self.request_transcription.emit(Path(file_path))
+            self._remember_video(Path(file_path))
 
     @Slot()
     def _on_regenerate_clicked(self) -> None:
@@ -285,6 +300,66 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("Aguarde finalizar o processamento atual", 3000)
             return
         self.request_regeneration.emit()
+
+    def _load_recent_videos(self) -> None:
+        paths = load_recent_videos(limit=self._recent_videos_limit)
+        self._recent_videos = paths
+        self._update_recent_state()
+
+    def _remember_video(self, path: Path) -> None:
+        if not path.exists():
+            return
+        normalized = path.resolve()
+        current: list[Path] = []
+        for existing in self._recent_videos:
+            try:
+                existing_resolved = existing.resolve()
+            except OSError:
+                continue
+            if existing_resolved != normalized:
+                current.append(existing)
+        current.insert(0, normalized)
+        self._recent_videos = current[: self._recent_videos_limit]
+        save_recent_videos(self._recent_videos, limit=self._recent_videos_limit)
+        self._update_recent_state()
+
+    def _update_recent_state(self) -> None:
+        has_recents = bool(self._recent_videos)
+        self.action_recent.setEnabled(has_recents)
+        if has_recents:
+            top_items = [path.name for path in self._recent_videos[:3]]
+            preview = " • ".join(top_items)
+            self.recent_label.setText(f"Recentes: {preview}")
+        else:
+            self.recent_label.setText("Nenhum vídeo recente.")
+
+    def _show_recent_menu(self) -> None:
+        if not self._recent_videos:
+            return
+        menu = QMenu(self)
+        for path in self._recent_videos:
+            action = menu.addAction(path.name)
+            action.setToolTip(str(path))
+            action.triggered.connect(lambda checked=False, p=path: self._open_recent(p))
+        menu.addSeparator()
+        clear_action = menu.addAction("Limpar lista")
+        clear_action.triggered.connect(self._clear_recent_videos)
+        menu.exec_(QCursor.pos())
+
+    def _open_recent(self, path: Path) -> None:
+        if not path.exists():
+            self.statusBar().showMessage(f"Arquivo não encontrado: {path}", 4000)
+            self._recent_videos = [p for p in self._recent_videos if p != path]
+            save_recent_videos(self._recent_videos, limit=self._recent_videos_limit)
+            self._update_recent_state()
+            return
+        self.request_transcription.emit(path)
+        self._remember_video(path)
+
+    def _clear_recent_videos(self) -> None:
+        self._recent_videos = []
+        save_recent_videos([], limit=self._recent_videos_limit)
+        self._update_recent_state()
 
     def set_processing(self, status: ProcessingStatus) -> None:
         self.progress.setVisible(True)
@@ -689,6 +764,7 @@ class MainWindow(QMainWindow):
 
     def _update_regenerate_state(self) -> None:
         self.action_regenerate.setEnabled(self._has_summary and not self._is_busy)
+        self.action_recent.setEnabled(not self._is_busy and bool(self._recent_videos))
 
 
 if __name__ == "__main__":

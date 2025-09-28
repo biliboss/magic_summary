@@ -10,6 +10,8 @@ from typing import Any, Iterable, Sequence
 from .models import TranscriptSegment, VideoSummary, SummaryMetadata
 
 CACHE_DIR = Path(__file__).resolve().parent.parent / "data" / "transcripts"
+STATE_DIR = Path(__file__).resolve().parent.parent / "data" / "state"
+RECENT_VIDEOS_FILE = STATE_DIR / "recent_videos.json"
 
 
 @dataclass(frozen=True)
@@ -33,6 +35,11 @@ class TranscriptFingerprint:
 def _ensure_cache_dir() -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     return CACHE_DIR
+
+
+def _ensure_state_dir() -> Path:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return STATE_DIR
 
 
 def _fingerprint_path(video_path: Path) -> Path:
@@ -184,3 +191,46 @@ def transcript_to_text(segments: Iterable[TranscriptSegment]) -> str:
             continue
         lines.append(text)
     return "\n".join(lines)
+
+
+def load_recent_videos(limit: int = 10) -> list[Path]:
+    if not RECENT_VIDEOS_FILE.exists():
+        return []
+    try:
+        payload = json.loads(RECENT_VIDEOS_FILE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+
+    if not isinstance(payload, list):
+        return []
+
+    recent_paths: list[Path] = []
+    for entry in payload:
+        if not isinstance(entry, str):
+            continue
+        path = Path(entry)
+        if path.exists():
+            recent_paths.append(path)
+        if len(recent_paths) >= limit:
+            break
+    return recent_paths
+
+
+def save_recent_videos(paths: Iterable[Path], *, limit: int = 10) -> None:
+    _ensure_state_dir()
+    unique_paths: list[str] = []
+    for path in paths:
+        try:
+            resolved = str(Path(path).resolve())
+        except OSError:
+            continue
+        if resolved in unique_paths:
+            continue
+        unique_paths.append(resolved)
+        if len(unique_paths) >= limit:
+            break
+
+    RECENT_VIDEOS_FILE.write_text(
+        json.dumps(unique_paths, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
